@@ -1154,9 +1154,9 @@ impl EventSink for LosesTheLlmFailureThenRefusesForSize {
 /// `failed`, with the row finished and nothing left in flight. Before the
 /// mark came first, that resume path published its `failed` unmeasured,
 /// and a refusal left the row in flight for every start to resume into
-/// again. The fault that sends the run to that path, a lost
-/// `llm.failure`, also loses the call's cost from the stream: issue 1108,
-/// not this change's.
+/// again. The fault that sends the run to that path is a lost
+/// `llm.failure`, which the resume publishes again, before its `failed`
+/// (issue 1108), so the billed call's cost is on the stream once.
 #[tokio::test]
 async fn an_oversized_failure_reproduced_on_resume_ends_on_the_refusal() {
     let dir = tempdir().unwrap();
@@ -1230,6 +1230,22 @@ async fn an_oversized_failure_reproduced_on_resume_ends_on_the_refusal() {
     assert!(
         resumed.is_err(),
         "the reproduced failure ends the run: {resumed:?}"
+    );
+    let failures: Vec<Event> = recording
+        .events()
+        .into_iter()
+        .filter(|event| matches!(event.payload, EventPayload::LlmFailure(_)))
+        .collect();
+    let [failure] = &failures[..] else {
+        panic!("the lost llm.failure, once: {failures:?}");
+    };
+    assert!(
+        failure
+            .envelope
+            .cost
+            .as_ref()
+            .is_some_and(|cost| cost.total_cost > 0.0),
+        "with the billed call's cost: {failure:?}"
     );
     let failed: Vec<Event> = recording
         .events()

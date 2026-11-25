@@ -101,7 +101,8 @@ pub const SCHEMA_CLASS: &str = "worker";
 /// - **v11** — `llm_dispatch.origin` (#824). Only agent-turn rows replay as reducer
 ///   turns; sampling and elicitation run inside a tool call. `NULL` reads as agent turn.
 /// - **v12** — `terminal_outcome`/`terminal_published_at` (#823); why: `store/terminal_outcome.rs`.
-pub const WORKER_SCHEMA_VERSION: u32 = 12;
+/// - **v13** — `llm_dispatch.failure_event` (issue 1108); why: `store/llm_failure.rs`.
+pub const WORKER_SCHEMA_VERSION: u32 = 13;
 
 /// Soft warning threshold for the `state_blob` size, in bytes.
 /// At this size, a write logs a warning to give the operator
@@ -493,6 +494,7 @@ impl WorkerStore {
         (10, WORKER_MIGRATION_V10_SQL),
         (11, llm_origin::MIGRATION_V11_SQL),
         (12, terminal_outcome::MIGRATION_V12_SQL),
+        (13, llm_failure::MIGRATION_V13_SQL),
     ];
 
     /// Initialise schema_meta and run worker migrations. Idempotent.

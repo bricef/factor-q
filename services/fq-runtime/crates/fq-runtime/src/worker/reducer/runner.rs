@@ -760,7 +760,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                     continue;
                 }
                 return self
-                    .reproduce_lost_failure(&agent_id, invocation_id, r)
+                    .reproduce_lost_failure(&agent_id, invocation_id, r, &llms, &tools)
                     .await;
             }
             completed.push((

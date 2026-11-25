@@ -490,7 +490,7 @@ async fn two_openers_of_a_fresh_worker_db_both_succeed() {
 
 /// The crash #970 predicted and nobody had reproduced: an upgrade that
 /// stops after some rungs have applied and before the version is
-/// written. Rung 12 fails part-way here, after rungs 2 to 11 have run;
+/// written. Rung 13 fails part-way here, after rungs 2 to 12 have run;
 /// without the transaction they stayed, the file still read v1, and
 /// every later open re-ran rung 2 and failed on `is_error`. With it,
 /// nothing stays and the next open upgrades cleanly.
@@ -505,7 +505,7 @@ async fn a_worker_upgrade_interrupted_after_a_rung_reopens_cleanly() {
 
     let mut interrupted = WorkerStore::MIGRATIONS.to_vec();
     let last = interrupted.last_mut().expect("the ladder has rungs");
-    last.1 = "ALTER TABLE invocation_state ADD COLUMN terminal_outcome TEXT; \
+    last.1 = "ALTER TABLE llm_dispatch ADD COLUMN failure_event TEXT; \
               SELECT no_such_column FROM invocation_state";
     let err = schema::bootstrap_versioned(&pool, SCHEMA_CLASS, WORKER_SCHEMA_VERSION, &interrupted)
         .await
@@ -530,7 +530,7 @@ async fn a_worker_upgrade_interrupted_after_a_rung_reopens_cleanly() {
         .expect("the next open after an interrupted upgrade must succeed");
     assert!(
         !left_behind.contains(&"is_error".to_string()),
-        "rung 2 must roll back with the failure of rung 12"
+        "rung 2 must roll back with the failure of rung 13"
     );
     assert_eq!(
         store.read_schema_version().await.unwrap(),
@@ -1324,6 +1324,96 @@ async fn v11_to_v12_migration_opens_and_the_terminal_outcome_round_trips() {
     let back = store.get_invocation_state(&inv).await.unwrap().unwrap();
     assert_eq!(back.terminal_published_at, Some(3_000));
     assert!(back.unpublished_terminal_event().unwrap().is_none());
+}
+
+/// v13 (issue 1108): a failed call's row keeps the `llm.failure` it ended
+/// in, whole, written while the row is `dispatched`, before it is closed.
+/// Rows closed before v13 keep none.
+#[tokio::test]
+async fn v12_to_v13_migration_opens_and_a_failed_calls_row_keeps_its_llm_failure() {
+    use crate::events::{Event, EventPayload, LlmErrorKind, LlmFailurePayload};
+
+    let db = populated_db_at(12).await;
+    let store = WorkerStore::open(&db.path).await.unwrap();
+    assert_eq!(
+        store.read_schema_version().await.unwrap(),
+        Some(WORKER_SCHEMA_VERSION)
+    );
+    let legacy = store
+        .list_llm_dispatches_for_invocation(&db.fixture.completed)
+        .await
+        .unwrap();
+    assert!(!legacy.is_empty());
+    for row in &legacy {
+        assert_eq!(
+            store
+                .llm_failure_event(&row.invocation_id, &row.request_id)
+                .await
+                .unwrap(),
+            None,
+            "a row closed before v13 keeps no llm.failure"
+        );
+    }
+
+    let event = Event::new(
+        crate::agent::AgentId::new("agent-v13").unwrap(),
+        uuid::Uuid::now_v7(),
+        EventPayload::LlmFailure(LlmFailurePayload {
+            round: 2,
+            call_id: uuid::Uuid::now_v7(),
+            model: "haiku".to_string(),
+            error_kind: LlmErrorKind::EmptyResponse,
+            error_message: "model returned an empty response".to_string(),
+            duration_ms: 12,
+            usage: None,
+            origin: Default::default(),
+        }),
+    );
+    let (inv, req) = ("inv-v13", "req-v13");
+    store
+        .write_llm_intent(
+            inv,
+            req,
+            "haiku",
+            "{}",
+            &crate::events::LlmCallOrigin::AgentTurn,
+            1,
+        )
+        .await
+        .unwrap();
+    assert!(
+        store
+            .write_llm_failure_event(inv, req, &event)
+            .await
+            .is_err(),
+        "an intent row is not one a call's failure closes"
+    );
+    store.write_llm_dispatched(inv, req, 2).await.unwrap();
+    store
+        .write_llm_failure_event(inv, req, &event)
+        .await
+        .unwrap();
+    store
+        .write_llm_completed(inv, req, "model returned an empty response", true, 0.001, 3)
+        .await
+        .unwrap();
+    let stored = store
+        .llm_failure_event(inv, req)
+        .await
+        .unwrap()
+        .expect("the closed row keeps its llm.failure");
+    assert_eq!(
+        serde_json::to_value(Event::from_wire(stored.as_bytes()).unwrap()).unwrap(),
+        serde_json::to_value(&event).unwrap(),
+        "the stored event round-trips whole, envelope included"
+    );
+    assert!(
+        store
+            .write_llm_failure_event(inv, req, &event)
+            .await
+            .is_err(),
+        "a closed row is not written again"
+    );
 }
 
 #[tokio::test]

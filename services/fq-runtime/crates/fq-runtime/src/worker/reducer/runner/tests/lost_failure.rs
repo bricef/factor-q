@@ -142,14 +142,12 @@ async fn a_world() -> World {
 
 impl World {
     async fn run(&self) -> Result<InvocationOutcome, ExecutorError> {
+        self.run_with(&model()).await
+    }
+
+    async fn run_with(&self, llm: &FixtureClient) -> Result<InvocationOutcome, ExecutorError> {
         self.runner
-            .run(
-                &self.agent,
-                &model(),
-                TriggerSource::Manual,
-                None,
-                json!("go"),
-            )
+            .run(&self.agent, llm, TriggerSource::Manual, None, json!("go"))
             .await
     }
 
@@ -477,7 +475,133 @@ async fn a_stop_after_both_of_the_calls_events_does_not_count_its_cost_twice() {
     let resumed = world.resume().await;
     let left = world.left(resumed, from).await;
     left.the_calls_failure();
+    assert_eq!(
+        left.of_kind("llm_failure").len(),
+        2,
+        "the resume's copy is the second on the stream, so the projection below meets both"
+    );
     left.assert_the_failed_carries_the_runs_totals();
     left.assert_the_projection_counts_the_cost_once().await;
     left.assert_the_run_ended().await;
+}
+
+/// A row that keeps no `llm.failure` (one closed before worker schema
+/// v13), or one that is not this call's (only a hand edit makes one):
+/// nothing is published in its name. The run still ends on its `failed`,
+/// which carries the run's totals, the failed call's cost among them.
+#[tokio::test]
+async fn a_row_without_the_calls_own_failure_publishes_none() {
+    for planted in ["none", "another call's"] {
+        let world = a_world().await;
+        world.stopped_at_publish(AT_FAILURE, "llm_failure").await;
+        let stored = match planted {
+            "none" => None,
+            _ => {
+                let mut other = world.sink.refused()[0].clone();
+                let EventPayload::LlmFailure(payload) = &mut other.payload else {
+                    unreachable!()
+                };
+                payload.call_id = Uuid::now_v7();
+                Some(serde_json::to_string(&other).unwrap())
+            }
+        };
+        let db = world.worker_db().await;
+        let planted_rows = sqlx::query(
+            "UPDATE llm_dispatch SET failure_event = ? WHERE failure_event IS NOT NULL",
+        )
+        .bind(stored)
+        .execute(&db)
+        .await
+        .unwrap()
+        .rows_affected();
+        assert_eq!(
+            planted_rows, 1,
+            "the failed call's row kept its llm.failure"
+        );
+        db.close().await;
+        let from = world.sink.events().len();
+        let resumed = world.resume().await;
+        let left = world.left(resumed, from).await;
+        assert_eq!(
+            left.of_kind("llm_failure").len(),
+            0,
+            "{planted}: nothing goes out in the call's name"
+        );
+        left.assert_the_failed_carries_the_runs_totals();
+        left.assert_the_run_ended().await;
+    }
+}
+
+/// A provider error whose text is longer than the broker takes. The stop
+/// fell at the call's `llm.dispatched`, so the live run never measured its
+/// `llm.failure`; the resume does, before it publishes it, and ends the
+/// run on the refusal's `failed`, as the live run would have (#828),
+/// instead of returning the refusal and leaving the run in flight for
+/// every start to refuse again. That `failed` carries the run's totals.
+#[tokio::test]
+async fn a_reproduced_failure_too_large_for_the_broker_ends_the_run_on_the_refusal() {
+    const LIMIT: usize = 64 * 1024;
+    let world = a_world().await;
+    world.sink.set_max_payload(LIMIT);
+    let llm = FixtureClient::new();
+    llm.push_response(tool_use(TOOL, "tc-0", json!({}), FIRST));
+    llm.push_error(crate::llm::LlmError::RequestFailed("x".repeat(2 * LIMIT)));
+    world.sink.fail_publish_at(AT_DISPATCHED);
+    let outcome = world.run_with(&llm).await;
+    assert!(
+        matches!(outcome, Err(ExecutorError::Bus(_))),
+        "the stop: {outcome:?}"
+    );
+    let from = world.sink.events().len();
+    let resumed = world.resume().await;
+    let left = world.left(resumed, from).await;
+    assert!(
+        matches!(
+            &left.resumed,
+            Err(ExecutorError::InvocationFailed {
+                kind: crate::events::FailureKind::PayloadTooLarge,
+                ..
+            })
+        ),
+        "the resume ends on the refusal: {:?}",
+        left.resumed
+    );
+    let kinds: Vec<&str> = left
+        .resume_events
+        .iter()
+        .map(|event| event.payload.event_type())
+        .collect();
+    assert_eq!(
+        kinds,
+        ["failed", "invocation_archived"],
+        "the resume's events"
+    );
+    let EventPayload::Failed(failed) = &left.resume_events[0].payload else {
+        unreachable!()
+    };
+    assert!(
+        matches!(
+            failed.detail,
+            Some(crate::events::FailureDetail::PayloadTooLarge {
+                event_type: crate::events::EventKind::LlmFailure,
+                ..
+            })
+        ),
+        "the refused event is the call's llm.failure: {:?}",
+        failed.detail
+    );
+    let totals = failed.partial_totals;
+    assert!(
+        (totals.total_cost - cost_of(usage(FIRST.0, FIRST.1))).abs() < 1e-12
+            && (totals.total_llm_calls, totals.total_tool_calls) == (1, 1),
+        "the run's totals: {totals:?}"
+    );
+    assert!(
+        left.store
+            .find_in_flight_invocations()
+            .await
+            .unwrap()
+            .is_empty(),
+        "nothing for the next start to resume"
+    );
 }
