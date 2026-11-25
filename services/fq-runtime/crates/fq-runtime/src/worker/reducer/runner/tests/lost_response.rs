@@ -283,8 +283,9 @@ async fn assert_the_run_ended_with_its_cost_counted_once(
 /// `llm.response`, after the call was billed and its row closed. The fault
 /// ends the run's drive and leaves the run in flight, with the call's
 /// cost on no event. The next start publishes that very event, chained to
-/// the call's `llm.dispatched`, before the run goes on; each call's cost
-/// is on the stream once, and the run's totals are what its rows record.
+/// the call's `llm.dispatched`, before the run goes on, and the run's next
+/// events chain on from it; each call's cost is on the stream once, and
+/// the run's totals are what its rows record.
 #[tokio::test]
 async fn a_lost_response_publish_keeps_the_calls_cost_on_the_stream() {
     let world = a_world().await;
@@ -318,6 +319,15 @@ async fn a_lost_response_publish_keeps_the_calls_cost_on_the_stream() {
         Some(dispatched.envelope.event_id),
         "chained to the call's llm.dispatched"
     );
+    assert_eq!(
+        events[from].envelope.event_id, first.envelope.event_id,
+        "the resume opens on it"
+    );
+    assert_eq!(
+        events[from + 1].envelope.parent_event_id,
+        Some(first.envelope.event_id),
+        "the resumed run's events chain on from it"
+    );
     assert_each_response_once(&events);
     assert_the_run_ended_with_its_cost_counted_once(&world, &resumed, from).await;
 }
@@ -325,8 +335,11 @@ async fn a_lost_response_publish_keeps_the_calls_cost_on_the_stream() {
 /// The first call's `llm.response` reached the stream, and the run never
 /// learned it: the broker stored it and the acknowledgement was lost, or
 /// the daemon stopped before it acted on it. The resume cannot tell this
-/// from a publish that was lost. Whatever it publishes, the stream holds
-/// the one event, and the cost reports count the call once.
+/// from a publish that was lost, and publishes it again: the same event,
+/// with the same `event_id`, which a broker inside its duplicate window
+/// drops and which the projection, an upsert on `event_id`, counts once
+/// past it. The stream holds the one event, and the cost reports count the
+/// call once.
 #[tokio::test]
 async fn a_response_out_before_the_stop_is_counted_once() {
     let world = a_world().await;
@@ -349,7 +362,15 @@ async fn a_response_out_before_the_stop_is_counted_once() {
     let from = world.sink.events().len();
     let resumed = resumed(&world, &asked).await;
     let events = world.sink.events();
-    copies_of_response(&events, 0);
+    assert_eq!(
+        copies_of_response(&events, 0).len(),
+        2,
+        "the resume's copy is the second on the stream, so the projection below meets both"
+    );
+    assert!(
+        matches!(events[from].payload, EventPayload::LlmResponse(_)),
+        "the resume opens on it"
+    );
     for n in 1..CALLS.len() {
         assert_eq!(copies_of_response(&events, n).len(), 1, "call {}", n + 1);
     }
@@ -373,6 +394,176 @@ async fn a_resume_publishes_the_last_calls_lost_response_alone() {
     );
     assert_each_response_once(&events);
     assert_the_run_ended_with_its_cost_counted_once(&world, &resumed, from).await;
+}
+
+/// The call's `llm.response` goes onto its row in the write that closes
+/// the row, not in a write of its own: a stop at the close leaves the row as
+/// it was, `dispatched` and keeping nothing. Keeping the event adds no
+/// write a stop can fall after, which would leave the row `dispatched`, a
+/// call a resume cannot tell the outcome of, once the outcome was known.
+/// The stop is staged by failing the close.
+#[tokio::test]
+async fn the_calls_response_is_kept_by_the_write_that_closes_its_row() {
+    let world = a_world().await;
+    let db = world.worker_db().await;
+    sqlx::query(
+        "CREATE TRIGGER the_daemon_stops \
+         BEFORE UPDATE OF status ON llm_dispatch \
+         WHEN NEW.status = 'completed' AND NEW.is_error = 0 \
+         BEGIN SELECT RAISE(ABORT, 'the daemon stopped'); END",
+    )
+    .execute(&db)
+    .await
+    .unwrap();
+    let outcome = world.run_with(&model(&answers())).await;
+    assert!(
+        matches!(outcome, Err(ExecutorError::WorkerStore(_))),
+        "the stop: {outcome:?}"
+    );
+    let rows: Vec<(String, Option<String>)> =
+        sqlx::query_as("SELECT status, response_event FROM llm_dispatch")
+            .fetch_all(&db)
+            .await
+            .unwrap();
+    db.close().await;
+    assert_eq!(
+        rows,
+        [("dispatched".to_string(), None)],
+        "the call's row is as the stop found it"
+    );
+}
+
+/// A row that keeps an event this build cannot publish as the call's
+/// `llm.response`: another call's, another run's, or text that is not an
+/// event (only a hand edit makes these), or none at all, as a row closed
+/// before worker schema v14 keeps. Nothing is published in the call's
+/// name, and the run goes on to its end; its `completed` still carries the
+/// call's cost in its totals.
+#[tokio::test]
+async fn a_row_without_the_calls_own_response_publishes_none() {
+    for planted in ["none", "another call's", "another run's", "not an event"] {
+        let world = a_world().await;
+        let asked = stopped_at(&world, FIRST_RESPONSE, "llm_response").await;
+        let mut other = world.sink.refused()[0].clone();
+        let stored = match planted {
+            "none" => None,
+            "another call's" => {
+                let EventPayload::LlmResponse(payload) = &mut other.payload else {
+                    unreachable!()
+                };
+                payload.call_id = Uuid::now_v7();
+                Some(serde_json::to_string(&other).unwrap())
+            }
+            "another run's" => {
+                other.envelope.invocation_id = Uuid::now_v7();
+                Some(serde_json::to_string(&other).unwrap())
+            }
+            _ => Some("{\"envelope\": \"not an event\"".to_string()),
+        };
+        let db = world.worker_db().await;
+        let planted_rows = sqlx::query(
+            "UPDATE llm_dispatch SET response_event = ? WHERE response_event IS NOT NULL",
+        )
+        .bind(stored)
+        .execute(&db)
+        .await
+        .unwrap()
+        .rows_affected();
+        assert_eq!(planted_rows, 1, "the call's row kept its llm.response");
+        db.close().await;
+        let resumed = resumed(&world, &asked).await;
+        let events = world.sink.events();
+        let first_call = call_ids(&events)[0];
+        assert!(
+            !events.iter().any(|event| matches!(
+                &event.payload,
+                EventPayload::LlmResponse(response) if response.call_id == first_call
+            )),
+            "{planted}: nothing goes out in the call's name"
+        );
+        let Ok(InvocationOutcome::Completed { cost, .. }) = resumed else {
+            panic!("{planted}: the run goes on to its end: {resumed:?}");
+        };
+        assert!(
+            (cost - billed()).abs() < 1e-12,
+            "{planted}: the run's completed carries its cost, {cost}"
+        );
+    }
+}
+
+/// The lost `llm.response` is larger than the broker takes. The stop fell
+/// at its publish, before the broker could refuse it; the resume measures
+/// it before it publishes it, and ends the run on the refusal's `failed`,
+/// as the live run would have ended (#828), instead of returning the
+/// refusal and leaving the run in flight for every start to refuse again.
+/// That `failed` carries the run's totals.
+#[tokio::test]
+async fn a_lost_response_too_large_for_the_broker_ends_the_run_on_the_refusal() {
+    const LIMIT: usize = 64 * 1024;
+    let world = a_world().await;
+    world.sink.set_max_payload(LIMIT);
+    let answer = canned(&"s".repeat(2 * LIMIT), CALLS[0].0, CALLS[0].1);
+    world.sink.fail_publish_at(FIRST_RESPONSE);
+    let outcome = world.run_with(&model(&[answer])).await;
+    assert!(
+        matches!(outcome, Err(ExecutorError::Bus(_))),
+        "the stop: {outcome:?}"
+    );
+    let from = world.sink.events().len();
+    world.sink.clear_fault();
+    let resumed = world
+        .runner
+        .resume(&world.agent, &FixtureClient::new(), world.invocation_id())
+        .await;
+    assert!(
+        matches!(
+            &resumed,
+            Err(ExecutorError::InvocationFailed {
+                kind: crate::events::FailureKind::PayloadTooLarge,
+                ..
+            })
+        ),
+        "the resume ends on the refusal: {resumed:?}"
+    );
+    let events = world.sink.events();
+    let kinds: Vec<&str> = events[from..]
+        .iter()
+        .map(|event| event.payload.event_type())
+        .collect();
+    assert_eq!(
+        kinds,
+        ["failed", "invocation_archived"],
+        "the resume's events"
+    );
+    let EventPayload::Failed(failed) = &events[from].payload else {
+        unreachable!()
+    };
+    assert!(
+        matches!(
+            failed.detail,
+            Some(crate::events::FailureDetail::PayloadTooLarge {
+                event_type: crate::events::EventKind::LlmResponse,
+                ..
+            })
+        ),
+        "the refused event is the call's llm.response: {:?}",
+        failed.detail
+    );
+    let totals = failed.partial_totals;
+    assert!(
+        (totals.total_cost - cost_of(usage(CALLS[0].0, CALLS[0].1))).abs() < 1e-12
+            && (totals.total_llm_calls, totals.total_tool_calls) == (1, 0),
+        "the run's totals: {totals:?}"
+    );
+    assert!(
+        world
+            .store
+            .find_in_flight_invocations()
+            .await
+            .unwrap()
+            .is_empty(),
+        "nothing for the next start to resume"
+    );
 }
 
 /// A run with two calls done, both out, stopped at the next tool's

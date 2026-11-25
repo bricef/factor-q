@@ -94,7 +94,7 @@ impl WorkerStore {
         let encoded = serde_json::to_string(failure)
             .map_err(|err| WorkerStoreError::Malformed(err.to_string()))?;
         let closed = (error_message, true, cost_usd, completed_at);
-        self.close_llm_dispatch(invocation_id, request_id, closed, Some(&encoded))
+        self.close_llm_dispatch(invocation_id, request_id, closed, Some(&encoded), None)
             .await
     }
 

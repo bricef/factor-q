@@ -623,9 +623,11 @@ async fn an_archive_too_large_after_completed_is_not_an_invocation_failure() {
 ///
 /// A `completed` carries the summary the model wrote, and the
 /// `llm.response` before it carries the same text, so live it is that
-/// response that is refused first. On a resume it is not: a crash at the
-/// response's publish leaves the turn in the WAL, and the replay goes
-/// straight to the `completed`.
+/// response that is refused first. On a resume it is not: a run drained
+/// once the response is out has the turn in the WAL, and the replay goes
+/// straight to the `completed`. (A crash at the response's publish leaves
+/// the response owed, and the resume measures that first: issue 1168,
+/// `runner/tests/lost_response.rs`.)
 #[tokio::test]
 async fn a_completed_too_large_for_the_broker_ends_the_run_failed_in_its_place() {
     let root = tempfile::tempdir().expect("workspace root");
@@ -633,18 +635,20 @@ async fn a_completed_too_large_for_the_broker_ends_the_run_failed_in_its_place()
     let llm = FixtureClient::new();
     llm.push_response(end_turn(&"s".repeat(64 * 1024)));
     // Publishes: 0 triggered, 1 llm.request, 2 llm.dispatched,
-    // 3 llm.response ← the crash.
-    world.sink.fail_publish_at(3);
-    world.run(&llm).await.expect_err("the crash");
+    // 3 llm.response ← the drain, seen at the next step boundary.
+    world.sink.drain_at_publish(3, world.runner.drain_signal());
+    let outcome = world.run(&llm).await.expect("the drain");
+    assert!(
+        matches!(outcome, InvocationOutcome::Suspended { .. }),
+        "{outcome:?}"
+    );
     let id = world.invocation_id();
     let before = world.sink.events().len();
 
-    world.sink.clear_fault();
     let limit = 32 * 1024;
     world.sink.set_max_payload(limit);
     let err = world
-        .runner
-        .resume(&world.agent, &FixtureClient::new(), id)
+        .resume_on_fresh_binary(&FixtureClient::new())
         .await
         .expect_err("the run ends failed");
     assert!(
@@ -658,9 +662,8 @@ async fn a_completed_too_large_for_the_broker_ends_the_run_failed_in_its_place()
         "{err:?}"
     );
 
-    // Measured, never published: the only event the sink refused is the
-    // crash's.
-    assert_eq!(kinds(&world.sink.refused()), ["llm_response"]);
+    // Measured, never published: the sink refused nothing.
+    assert!(kinds(&world.sink.refused()).is_empty());
     let resumed = &world.sink.events()[before..];
     assert_eq!(kinds(resumed), ["failed", "invocation_archived"]);
     let failed = failures(resumed)[0];

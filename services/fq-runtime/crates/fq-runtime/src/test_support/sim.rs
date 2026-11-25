@@ -2454,6 +2454,63 @@ mod sampling_resume {
         }
     }
 
+    /// A crash at the sampling call's `llm.response` leaves its tool call
+    /// ambiguous, and the run waits for an operator. Once the operator has
+    /// the tool's interrupted result recorded (`fq invocation resume`), the
+    /// resume publishes the lost `llm.response` first, itself, so the
+    /// sampling call's cost is on the stream once (issue 1168).
+    #[tokio::test]
+    async fn an_operators_resume_publishes_a_lost_sampling_response() {
+        let (_, events) = reference(false).await;
+        let fault = events
+            .iter()
+            .position(|event| {
+                matches!(&event.payload, EventPayload::LlmResponse(p)
+                    if p.origin != LlmCallOrigin::AgentTurn)
+            })
+            .expect("the sampling call's llm.response");
+        let run = crash_and_resume(false, fault).await;
+        assert!(
+            matches!(
+                run.outcome,
+                Err(ExecutorError::Resume(ResumeError::AmbiguousWal { .. }))
+            ),
+            "{:?}",
+            run.outcome
+        );
+        let lost = run.world.sink.refused();
+        let [lost] = &lost[..] else {
+            panic!("one lost publish: {lost:?}");
+        };
+        assert!(lost.envelope.cost.is_some(), "the sampling call is billed");
+        let inv = run.world.invocation_id();
+        run.world
+            .store
+            .inject_interrupted_results(&inv.to_string())
+            .await
+            .unwrap();
+        let from = run.world.sink.events().len();
+        let outcome = run.world.resume(&run.resume_llm).await;
+        assert!(
+            matches!(outcome, Ok(InvocationOutcome::Completed { .. })),
+            "{outcome:?}"
+        );
+        let events = run.world.sink.events();
+        assert_eq!(
+            serde_json::to_value(&events[from]).unwrap(),
+            serde_json::to_value(lost).unwrap(),
+            "the resume publishes the lost sampling llm.response, itself, first"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.envelope.event_id == lost.envelope.event_id)
+                .count(),
+            1,
+            "once"
+        );
+    }
+
     /// Rounds number agent turns: the sampling call and the result of the
     /// tool call it ran inside both belong to the turn that called the
     /// tool, so the next agent turn is Round 2, not 3.
@@ -3004,6 +3061,24 @@ mod crash_dst {
                         lines.join("\n")
                     );
                 }
+                // A crash at an `llm.response` lost it. The resume publishes
+                // that very event first, and the run reads as the
+                // uninterrupted one (issue 1168).
+                let lost = world.sink.refused();
+                if let [lost] = &lost[..]
+                    && matches!(lost.payload, EventPayload::LlmResponse(_))
+                {
+                    assert_eq!(
+                        serde_json::to_value(&resume_events[0]).unwrap(),
+                        serde_json::to_value(lost).unwrap(),
+                        "the resume publishes the lost llm.response, itself, first ({label})"
+                    );
+                    assert_eq!(
+                        observational_trace(&world.sink.events()),
+                        reference.observed,
+                        "the resumed run reads as the uninterrupted one ({label})"
+                    );
+                }
             }
         }
         expected
@@ -3146,10 +3221,11 @@ mod crash_dst {
             RecoveryCategory::SafeReplay
         );
 
-        // Second fault: the first publish the resume attempts (the
-        // tool span opening) fails too. Call the runner directly —
-        // SimWorld::resume would clear the injected fault.
-        world.sink.fail_publish_at(world.sink.events().len());
+        // Second fault: the resume publishes the lost response again
+        // first (issue 1168), and its next publish, the tool span
+        // opening, fails. Call the runner directly — SimWorld::resume
+        // would clear the injected fault.
+        world.sink.fail_publish_at(world.sink.events().len() + 1);
         let resume_llm = FixtureClient::new();
         load_fixture(&resume_llm, &responses[1..]);
         let err = world

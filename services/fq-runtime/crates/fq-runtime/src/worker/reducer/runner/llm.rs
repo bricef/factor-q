@@ -167,6 +167,12 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     /// own semantics — an agent turn fails the invocation, a sampling
     /// request merely declines. The outer `Err` is infrastructure
     /// (store / bus).
+    ///
+    /// A successful call's row is closed keeping its `llm.response`, which
+    /// the row lets go once the publish returns, so a resume can publish a
+    /// lost one again (issue 1168; `runner/owed_response.rs`). The event,
+    /// its context-pressure annotation included, is therefore built before
+    /// the close.
     pub(super) async fn dispatch_llm(
         &self,
         ctx: &mut InvocationCtx<'_>,
@@ -337,20 +343,6 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         ctx.totals.total_cost += total_cost;
         note_reported_cost(&request.model, total_cost, response.reported_cost_usd);
 
-        let response_json = serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string());
-        self.config
-            .store
-            .write_llm_completed(
-                &inv_str,
-                &req_str,
-                &response_json,
-                false,
-                total_cost,
-                self.config.clock.unix_now_ms(),
-            )
-            .await
-            .map_err(map_store_err)?;
-
         // Context-pressure tracking + one-shot soft warning (issue
         // #76). Only agent turns carry a tracker; sampling/elicitation
         // pass `None`. We record the turn's occupancy and history, and
@@ -406,7 +398,18 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 serde_json::json!({ "context_pressure": message }),
             );
         }
-        self.publish_chained(ctx.cursor, response_event).await?;
+        // The row is closed keeping this event, built above for that, until
+        // it is out (issue 1168; `runner/owed_response.rs`).
+        let response_json = serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string());
+        self.close_and_publish_response(
+            ctx.cursor,
+            &inv_str,
+            &req_str,
+            &response_json,
+            total_cost,
+            response_event,
+        )
+        .await?;
 
         Ok(Ok((
             ModelResponse {

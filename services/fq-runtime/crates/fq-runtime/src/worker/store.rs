@@ -45,6 +45,7 @@ use crate::db::schema::{self, Migration, SchemaError};
 mod durable_starts;
 mod llm_failure;
 mod llm_origin;
+mod llm_response;
 mod state_update;
 pub(crate) mod terminal_outcome;
 // The verdict type and its check are the kit's; re-exported so the
@@ -102,7 +103,8 @@ pub const SCHEMA_CLASS: &str = "worker";
 ///   turns; sampling and elicitation run inside a tool call. `NULL` reads as agent turn.
 /// - **v12** — `terminal_outcome`/`terminal_published_at` (#823); why: `store/terminal_outcome.rs`.
 /// - **v13** — `llm_dispatch.failure_event` (issue 1108); why: `store/llm_failure.rs`.
-pub const WORKER_SCHEMA_VERSION: u32 = 13;
+/// - **v14** — `llm_dispatch.response_event` (issue 1168); why: `store/llm_response.rs`.
+pub const WORKER_SCHEMA_VERSION: u32 = 14;
 
 /// Soft warning threshold for the `state_blob` size, in bytes.
 /// At this size, a write logs a warning to give the operator
@@ -495,6 +497,7 @@ impl WorkerStore {
         (11, llm_origin::MIGRATION_V11_SQL),
         (12, terminal_outcome::MIGRATION_V12_SQL),
         (13, llm_failure::MIGRATION_V13_SQL),
+        (14, llm_response::MIGRATION_V14_SQL),
     ];
 
     /// Initialise schema_meta and run worker migrations. Idempotent.
@@ -816,6 +819,9 @@ impl WorkerStore {
         Ok(())
     }
 
+    /// Close a row keeping no event for a resume, as a build before v13
+    /// closed every row. The runner closes with [`Self::write_llm_responded`]
+    /// or [`Self::write_llm_failed`]; test fixtures build rows with this.
     pub async fn write_llm_completed(
         &self,
         invocation_id: &str,
@@ -826,25 +832,28 @@ impl WorkerStore {
         completed_at: i64,
     ) -> Result<(), WorkerStoreError> {
         let closed = (response, is_error, cost_usd, completed_at);
-        self.close_llm_dispatch(invocation_id, request_id, closed, None)
+        self.close_llm_dispatch(invocation_id, request_id, closed, None, None)
             .await
     }
 
     /// `dispatched` → `completed`, with the call's `(response, is_error,
-    /// cost_usd, completed_at)` and the `llm.failure` a failed call ends in
-    /// (`store/llm_failure.rs`), all in one statement.
+    /// cost_usd, completed_at)` and the event the row keeps for a resume:
+    /// the `llm.failure` a failed call ends in (`store/llm_failure.rs`), or
+    /// the `llm.response` a successful one is published in
+    /// (`store/llm_response.rs`), all in one statement.
     async fn close_llm_dispatch(
         &self,
         invocation_id: &str,
         request_id: &str,
         (response, is_error, cost_usd, completed_at): (&str, bool, f64, i64),
         failure_event: Option<&str>,
+        response_event: Option<&str>,
     ) -> Result<(), WorkerStoreError> {
         let res = sqlx::query(
             r#"
             UPDATE llm_dispatch
             SET status = ?, response = ?, is_error = ?, cost_usd = ?, completed_at = ?,
-                failure_event = ?,
+                failure_event = ?, response_event = ?,
                 seq = 1 + MAX(
                     COALESCE((SELECT MAX(seq) FROM tool_dispatch WHERE invocation_id = ?), 0),
                     COALESCE((SELECT MAX(seq) FROM llm_dispatch WHERE invocation_id = ?), 0)
@@ -858,6 +867,7 @@ impl WorkerStore {
         .bind(cost_usd)
         .bind(completed_at)
         .bind(failure_event)
+        .bind(response_event)
         .bind(invocation_id)
         .bind(invocation_id)
         .bind(invocation_id)
