@@ -195,9 +195,7 @@ are not in the issue:
 
 - The inbox would also have closed a single-daemon gap that this design
   leaves open: a crash between the first WAL write and the claim's
-  `durably_started` update. It is the first entry under
-  [What this design does not close](#what-this-design-does-not-close),
-  and it can be closed without the inbox.
+  `durably_started` update. It can be closed without the inbox.
 - What this record accepts is, in the draft's own words, the alternative
   it rejected: "Per-worker SQLite claims: correct for a single-daemon
   deployment, invisible to siblings in a multi-worker one". Both halves
@@ -224,75 +222,6 @@ Every row names the code it rests on.
 | A released claim can be won again; a requeue releases the old sequence | `release_trigger_claim` |
 | A `claimed` row under another id is adopted on the next delivery | `take_over_trigger_claim` |
 | A recreated stream starts a new claim space | `TriggerKey::stream_epoch` |
-
-## What this design does not close
-
-These were found by reading the code for this record, except the second,
-which a test found. Each is stated as what the code does. None is one of
-the incidents.
-
-1. **A crash between the first WAL write and the claim's
-   `durably_started` update starts the trigger twice.** The WAL row is
-   written by the runner to the worker store; the claim row is updated
-   afterwards by the dispatcher in the control-plane store
-   (`mark_durable_started`), and the ack follows that. A process that
-   dies between the two leaves an in-flight WAL row, a `claimed` row and
-   an unacked message. The next process resumes the invocation from the
-   WAL (`fq-daemon/src/recovery.rs`, `classify_in_flight`), and when the
-   broker redelivers the trigger it finds a `claimed` row under another
-   id, adopts it and starts a second invocation. Nothing on the claim
-   row says the first one started. The window is the time between two
-   SQLite commits, normally milliseconds. Derived from the code. This is
-   the residual the
-   [2026-07-25 cleanroom review](../../reviews/2026-07-25-factor-q-cleanroom-review.md)
-   named in its §4.2 and left to the inbox plan, where the claim is the
-   first durable write and carries a pre-allocated invocation id. It
-   does not need the inbox: a claim row that carries the invocation id
-   from claim time would let the adopting process look for that
-   invocation's WAL row before starting anything. #954 says the worker
-   schema needs no trigger column because the claim row already links a
-   delivery to its invocation. That holds for forensics, and not for
-   this window, where the link is the thing that has not been written
-   yet.
-
-2. **A worker that fires `DurableStart` and returns within the same poll
-   is treated as one that never started.** `handle` learns of a durable
-   start only by polling the signal in its `select!` loop. If the
-   invocation future fires the signal and completes in one poll, the
-   loop breaks on the result with `durable_start_observed` still false,
-   and the trigger takes the pre-WAL path: the claim row is released
-   instead of marked, and a transient error would NAK a run that had
-   durably started. The first version of the replay's stub worker did
-   exactly this and the replay's claim-row assertion caught it. Whether
-   any path through `ReducerRunner` can do it was not established; every
-   one read for this record awaits the store or the broker between the
-   WAL write and its return. The dispatcher does not check.
-
-3. **A live process can hold a claim it will never settle.** The
-   same-claimant `Held` arm assumes the first copy is still going to
-   settle the delivery. After a panic in the invocation task, or a
-   `mark_trigger_started` that fails, it never will: the row stays
-   `claimed`, the message stays unacked, and every redelivery is dropped
-   by that arm until `TRIGGER_MAX_DELIVER` (5) is reached and the
-   advisory watch dead-letters the trigger as `trigger_exhausted`. In
-   the second case the invocation is running, so the verdict is false.
-   The same happens to a start that takes longer than the whole retry
-   ladder to reach its first WAL write. Derived from the code, and the
-   comment on that arm in `claim.rs` describes the hazard.
-
-4. **A duplicate dropped before durable start leaves no trace.** The
-   `Started` arm logs and counts. The same-claimant `Held` arm does
-   neither, and the count (`duplicate_dropped` in the consumer ledger)
-   is in memory and resets when the daemon restarts. The plan's
-   invariant I5 asked for every duplicate to be dropped loudly, with a
-   log line, a counter and a `fq doctor` check. That holds for one of
-   the two arms.
-
-5. **The claim table grows without bound.** `durably_started` rows are
-   never deleted and `control_plane/retention.rs` does not sweep the
-   table: one row per started trigger for the life of the instance. See
-   [retention](#6-retention-of-claim-rows) for how long a row has to
-   live.
 
 ## What this means for more than one worker
 
@@ -440,8 +369,8 @@ the window is reported by another. `DurableStart` is a
 (`worker/mod.rs`). Over a network the report can be late or lost. Until
 it arrives the row stays `claimed`, the message stays unacked, and
 redeliveries are dropped by the same-claimant arm; if it never arrives,
-the trigger is dead-lettered as exhausted while its invocation runs (the
-third gap above, made routine). The edge and bus transport document
+the trigger is dead-lettered as exhausted while its invocation runs. The
+edge and bus transport document
 states the rule for that hop: "Never ack upstream until the worker has
 durably accepted downstream".
 
@@ -456,8 +385,7 @@ once the durable start is reported by another process. If it stays, the
 report has to be durable, and the claim row has to carry the invocation
 id and the assigned worker from claim time so that "did it start?" can
 be asked instead of inferred. If it moves to claim time, that is PR-3.
-The pre-allocated invocation id is common to both, and it is also what
-closes the first gap above for one daemon.
+The pre-allocated invocation id is common to both.
 
 ### 4. Recovery of a dead worker's started invocations
 
@@ -517,15 +445,8 @@ daemon cannot start stays on the server for one that can. The plan calls
 it hygiene, not safety, and that is right for one daemon. For several it
 is how work reaches a worker with capacity.
 
-**Detection today.** `fq status` and `fq doctor` report
-`duplicate_dropped`, with the limits in the fourth gap above. The
-watcher adapter logs how many open pull requests close an issue and acts
-only when there are none (`adapters/github-watcher/outcome.go`,
-`openDeliverables`); it does not flag more than one. Nothing reports a
-`claimed` row that has been sitting.
-
-**With more than one consumer.** A duplicate across daemons with
-separate stores increments nothing anywhere. The only signal is the
+**Detection, with more than one consumer.** A duplicate across daemons
+with separate stores increments nothing anywhere. The only signal is the
 outcome: two invocations, two pull requests.
 
 **The inbox.** PR-7: the watcher warns and labels an issue with more
@@ -540,8 +461,6 @@ multi-consumer case, and decide whether an agent's cap is per daemon or
 global.
 
 ### 6. Retention of claim rows
-
-**Today.** None. See the fifth gap above.
 
 **How long a row must live.** For as long as its message can be
 delivered again. `fq-triggers` is not a work-queue stream, whatever the
@@ -566,13 +485,6 @@ gone.
 
 **The inbox.** No `max_age` on the bucket; terminal claims are collected
 after 48 hours, chosen to exceed the stream's 24 (plan §5.2).
-
-**Before multi-node, and before then.** Add retention to the table with
-its floor tied to `DEFAULT_TRIGGER_MAX_AGE` in code, the way
-`stale_worker_retention_default_dwarfs_the_stale_threshold` ties the
-worker window to its threshold. How much longer than the floor to keep a
-row is a question about the forensic link (#954), and the two should be
-decided together.
 
 ### The condition for reopening this decision
 
@@ -663,16 +575,10 @@ From the draft of 2026-07-19, still standing:
   claimed or started, whatever caused the duplicate and however late it
   arrives, for as long as the claim row exists. No timing parameter
   appears in that argument. Across a restart the argument rests on
-  adoption, and the first gap is where it fails.
+  adoption.
 - The dispatcher keeps its most delicate code: the `DurableStart`
   channel, the ack `select!` in `handle` and the choreography after it.
   The inbox would have deleted them.
-- The duplicate-start guarantee is narrower than "exactly once" by the
-  first two gaps in
-  [What this design does not close](#what-this-design-does-not-close):
-  a crash between the first WAL write and the claim update, and a worker
-  that fires and returns in one poll.
-- The claim table is unbounded until retention is added.
 - A second process consuming the trigger stream is not supported, and
   with the adoption rule as it stands it is worse than unsupported: on a
   shared store it turns a redelivery into a duplicate. Nothing in the
