@@ -33,21 +33,25 @@ going and why, see [VISION.md](VISION.md).
 
 The active track is **production readiness**, set out in the
 [2026-09-03 review](docs/reviews/2026-09-03-production-readiness-review.md)
-as five phases. Phases 0 and 1 were finished in September 2026, before the
-project used milestones for this track.
+as six phases, numbered 0 to 5. Phases 0 and 1 were finished in September
+2026, before the project used milestones for this track. Phase 2 was
+finished on 2026-11-21. The first tagged release comes next. What follows
+it is the maintainer's call and is not decided.
 
 | Milestone | State | Comes after |
 |---|---|---|
-| [Production readiness, Phase 2](#production-readiness-phase-2-the-record-is-trustworthy) | In progress | Phases 0 and 1 (done) |
-| [v0.0.1](#v001-first-tagged-release) | Not started | Phase 2 |
-| [Production readiness, Phase 3](#production-readiness-phase-3-bounded-growth-and-operable-state) | Not started | Phase 2 |
-| [M1 Net zero](#m1-net-zero-loop-instrumentation-and-reliability) | In progress, alongside the track above | M0 (met 2026-07-20) |
-| [Storage M3–M5](#storage-m3m5-extraction-embedding-service-wiring) | Parked | Phase 2 |
-| [Security, isolation and guardrails](#security-isolation-and-guardrails) | Parked | Phase 2 for its first item |
+| [Production readiness, Phase 2](#production-readiness-phase-2-the-record-is-trustworthy) | Finished 2026-11-21 | Phases 0 and 1 (done) |
+| [v0.0.1](#v001-first-tagged-release) | Next: its two blockers are being fixed | Phase 2 and the review of open bugs (both done) |
+| [Production readiness, Phase 3](#production-readiness-phase-3-bounded-growth-and-operable-state) | Not started, not scheduled | Not decided |
+| [M1 Net zero](#m1-net-zero-loop-instrumentation-and-reliability) | In progress | M0 (met 2026-07-20) |
+| [Storage M3–M5](#storage-m3m5-extraction-embedding-service-wiring) | Parked | Not decided |
+| [Security, isolation and guardrails](#security-isolation-and-guardrails) | Parked | Not decided |
 | [Beta gate](#beta-gate) | Standing gate | Nothing; it fills as alpha goes on |
 
 Three milestones have been [reached](#reached) and one
-[retired](#retired). Some planned work has
+[retired](#retired). Phase 2 is finished, but its GitHub milestone is still
+open, so it stays under [Open milestones](#open-milestones) until it is
+closed there. Some planned work has
 [no milestone yet](#planned-with-no-milestone-yet).
 
 One name is used for two things. "Phase 2" in this file means Phase 2 of
@@ -90,11 +94,17 @@ to Phase 3 by decision.
 The running history, the decisions and the exit criteria as amended are in
 the comments on [#410](https://github.com/bricef/factor-q/issues/410).
 
-**What it holds back.** The review parks the storage track, Memory and
-Skills, the multi-node work and container isolation until this phase is
+**State.** Finished. Its last issue closed on 2026-11-21, and every one of
+its 46 issues is closed. The milestone is still open on GitHub. What the
+phase changed, and what it leaves open, is in
+[STATUS.md](STATUS.md#production-readiness-phase-2-what-it-changed).
+
+**What it held back.** The review parked the storage track, Memory and
+Skills, the multi-node work and container isolation until this phase was
 done, because none of them makes the record harder to lose. The one
-exception it names is the egress proxy, which is the first item after this
-phase.
+exception it named is the egress proxy, as the first item after this
+phase. None of them is scheduled yet: what follows the first tagged
+release is the maintainer's call.
 
 ### v0.0.1: first tagged release
 
@@ -110,6 +120,22 @@ whether it still describes the code after Phase 2, then mint the tag.
 
 **Reached when** `v0.0.1` exists as a tagged release built by
 `release.yml`.
+
+**State.** The first step is done. On 2026-11-25, 76 open issues were
+re-checked against `main` and 4 were closed; the result is a comment on
+[#977](https://github.com/bricef/factor-q/issues/977). The same day the
+maintainer chose two bugs that block the release, and both are being
+fixed:
+
+- [#1108](https://github.com/bricef/factor-q/issues/1108): when a billed
+  model call fails and the publish of its failure event is lost, the
+  call's cost never reaches the event stream.
+- [#1040](https://github.com/bricef/factor-q/issues/1040): an MCP
+  resource read during an invocation's setup has no timeout, so a server
+  that never answers holds the run and its worker permit for as long as
+  the daemon lives. Reporting a setup that is held too long, whatever the
+  cause, is [#1159](https://github.com/bricef/factor-q/issues/1159), and
+  does not block the release.
 
 **Open question.** The review's Phase 4 ends by cutting `v0.1.0`. Whether
 `v0.0.1` comes before that or replaces it, and which Phase 4 items it
@@ -137,9 +163,10 @@ databases are flat over a seven-day dogfood window; a restore from backup
 on a clean host boots and answers `fq status`; the alert has fired once in
 a drill.
 
-**State.** Not started. The milestone holds the issues that already exist
-for it; most of the review's items have no issue yet and are filed when
-the phase begins.
+**State.** Not started, and not scheduled. The maintainer has said he will
+reassess what comes after Phase 2, so this phase is not the next step by
+default. The milestone holds the issues placed in it so far; most of the
+review's items have no issue yet.
 
 ### M1 Net zero: loop instrumentation and reliability
 
@@ -163,9 +190,9 @@ that what is measured is the system and not the maintainer holding it up.
 This milestone is the instrument and not the result. Whether the answer is
 yes is M1 itself.
 
-**State.** In progress, alongside production readiness. The ledger, the
-measures and the human-entered primitives are on `main`; the trajectory
-plot and the weekly report are not built.
+**State.** In progress. The ledger, the measures and the human-entered
+primitives are on `main`; the trajectory plot and the weekly report are
+not built.
 
 ### Storage M3–M5: extraction, embedding, service wiring
 
@@ -181,8 +208,9 @@ collection) and M2 (access control) are done. What remains is extraction
 
 **Reached when** M3, M4 and M5 are done by that plan's own criteria.
 
-**State.** Parked. The production-readiness review holds this track until
-Phase 2 is done. The milestone also carries the design review of the
+**State.** Parked. The production-readiness review held this track until
+Phase 2 was done. Phase 2 is done, and whether this track comes next is the
+maintainer's call. The milestone also carries the design review of the
 store's operator surface, which has to come before the store gets a
 registry of its own: that was the last phase of the registry work and was
 sequenced with M5.
@@ -206,9 +234,9 @@ a draft, holds isolation until the graph executor's first pass.
 container isolation built, and secret redaction and cost control at the
 trigger boundary each either built or decided against.
 
-**State.** Parked, in a known order. The egress proxy is the first item
-after Phase 2, by the review's own exception. Container isolation waits on
-the graph executor. The other two await decisions.
+**State.** Parked, in a known order. The review named the egress proxy as
+the first item after Phase 2; it is not scheduled yet. Container isolation
+waits on the graph executor. The other two await decisions.
 
 This is the least sharply defined milestone here. It has no single test,
 and its items become due at different times. It should be split or
@@ -275,9 +303,11 @@ several runs, replay green against a real broker. Its
 [plan](docs/plans/closed/2026-07-18-exactly-once-trigger-dispatch.md)
 closed the same day.
 
-The design record lists the gaps it knowingly leaves. Those, and the other
-work that followed the decision, are part of
-[Phase 2](#production-readiness-phase-2-the-record-is-trustworthy).
+When the design was accepted, the code had five gaps it knowingly left
+open. They, and the other work that followed the decision, were part of
+[Phase 2](#production-readiness-phase-2-the-record-is-trustworthy), and all
+five are closed; [STATUS.md](STATUS.md#the-five-gaps-adr-0032-listed-and-how-each-closed)
+records how.
 
 ## Retired
 
