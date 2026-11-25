@@ -26,12 +26,11 @@ use super::{InvocationCtx, ReducerRunner, map_store_err};
 use crate::agent::AgentId;
 use crate::events::{
     DeferralReason, Event, EventPayload, FailureKind, FailurePhase, InvocationDeferredPayload,
-    InvocationTotals,
 };
 use crate::worker::ExecutorError;
-use crate::worker::reducer::rounds::totals_of_llm_rows;
+use crate::worker::reducer::rounds::totals_of_wal_rows;
 use crate::worker::reducer::types::Reducer;
-use crate::worker::store::{DispatchStatus, LlmDispatchRow, ToolDispatchRow};
+use crate::worker::store::{LlmDispatchRow, ToolDispatchRow};
 
 /// The `invocation_state.phase` a deferred row carries, for the stuck
 /// sweep and the operator surface. Not a classifier: the phase is one
@@ -123,7 +122,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             .response
             .clone()
             .unwrap_or_else(|| "provider error (no detail recorded)".to_string());
-        let totals = recorded_totals(llms, tools);
+        let totals = totals_of_wal_rows(llms, tools);
         let mut cursor: Option<Uuid> = None;
         if let Some((failure, encoded_len)) = self.stored_llm_failure(invocation_id, row).await? {
             // An `llm.failure` the broker would refuse for its size ends the
@@ -225,18 +224,4 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         }
         Err(self.finished_elsewhere(invocation_id, "its row write did not land"))
     }
-}
-
-/// A run's totals as its WAL rows record them, by the rule a resume
-/// rebuilds them by ([`totals_of_llm_rows`]), with the tool calls that
-/// completed. The duration stays zero: it is the attempt's, and a
-/// reproduction runs nothing.
-fn recorded_totals(llms: &[LlmDispatchRow], tools: &[ToolDispatchRow]) -> InvocationTotals {
-    let (mut totals, _rounds) = totals_of_llm_rows(llms);
-    let completed_tools = tools
-        .iter()
-        .filter(|row| row.status == DispatchStatus::Completed)
-        .count();
-    totals.total_tool_calls = u32::try_from(completed_tools).unwrap_or(u32::MAX);
-    totals
 }

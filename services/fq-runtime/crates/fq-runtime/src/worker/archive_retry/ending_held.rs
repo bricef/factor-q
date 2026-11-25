@@ -28,8 +28,8 @@ use crate::control_plane::ownership::Ending;
 use crate::events::{
     EndingHeldReason, Event, EventPayload, HeldOutcome, InvocationEndingHeldPayload, RecordedTotals,
 };
-use crate::worker::reducer::rounds::totals_of_llm_rows;
-use crate::worker::store::{DispatchStatus, InvocationStateRow, WorkerStore, WorkerStoreError};
+use crate::worker::reducer::rounds::totals_of_wal_rows;
+use crate::worker::store::{InvocationStateRow, WorkerStore, WorkerStoreError};
 
 /// Why `hold` keeps the run's own ending off the stream, when it does.
 pub(super) fn reason_of(hold: &ArchiveHoldReason) -> Option<EndingHeldReason> {
@@ -81,11 +81,11 @@ pub(super) fn outcome_of(row: &InvocationStateRow) -> HeldOutcome {
     HeldOutcome::from(Ending::of_archived_phase(&row.phase))
 }
 
-/// The run's totals as its per-call rows in the WAL give them, by the rule
-/// a resume rebuilds them by: the model calls that produced an outcome,
-/// the cost of every completed model call, and the tool calls that
-/// completed. The rows stay until the archive is acknowledged, so a held
-/// row still has them.
+/// The run's totals as its per-call rows in the WAL give them
+/// ([`totals_of_wal_rows`]): the model calls that produced an outcome, the
+/// cost of every completed model call, and the tool calls that completed.
+/// The rows stay until the archive is acknowledged, so a held row still
+/// has them.
 pub(super) async fn recorded_totals(
     store: &WorkerStore,
     invocation_id: &str,
@@ -96,14 +96,10 @@ pub(super) async fn recorded_totals(
     let tools = store
         .list_tool_dispatches_for_invocation(invocation_id)
         .await?;
-    let (totals, _rounds) = totals_of_llm_rows(&llms);
-    let completed_tools = tools
-        .iter()
-        .filter(|row| row.status == DispatchStatus::Completed)
-        .count();
+    let totals = totals_of_wal_rows(&llms, &tools);
     Ok(RecordedTotals {
         total_llm_calls: totals.total_llm_calls,
-        total_tool_calls: u32::try_from(completed_tools).unwrap_or(u32::MAX),
+        total_tool_calls: totals.total_tool_calls,
         total_cost: totals.total_cost,
     })
 }
