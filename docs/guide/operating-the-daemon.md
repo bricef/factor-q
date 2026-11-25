@@ -1097,7 +1097,7 @@ the throttle and stays on.
 
 An agent's own `max_concurrent`
 ([#718](https://github.com/bricef/factor-q/issues/718),
-[agent definitions](agent-definitions.md#iteration-cap-concurrency-cap-and-reasoning-effort))
+[agent definitions](agent-definitions.md#iteration-cap-output-cap-concurrency-cap-and-reasoning-effort))
 holds a trigger the same way, for the same reason and by literally the
 same mechanism — one hold, one keepalive cadence, in the daemon's code
 as well as in this description: an agent already running as many
