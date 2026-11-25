@@ -1,10 +1,15 @@
 # Phase 2: MCP, Memory, and Skills
 
-**Status:** active (2026-04-11). Scope item 1 (the MCP client) is done, and
-item 6 partially (the `mcp:` agent-definition extension). Item 2 grew into
-the [storage + vector foundation plan](2026-06-27-storage-vector-foundation.md)
-(M1–M2 done, M3–M5 remain). Items 3–5 (memory, skills, context window
-management) are not started. One-screen view: [STATUS.md](../../../STATUS.md).
+**Status:** active (opened 2026-04-11), and parked. Scope item 1 (the MCP
+client) is done, and item 6 partially (the `mcp:` agent-definition
+extension). Item 2 grew into the
+[storage + vector foundation plan](2026-06-27-storage-vector-foundation.md)
+(M1–M2 done, M3–M5 remain, parked). Items 3–5 (memory, skills, context
+window management) are not started. The production-readiness review
+parked this work until its own Phase 2 was done; that Phase 2 finished on
+2026-11-21, and when this plan resumes is the maintainer's call and is
+not scheduled. This plan's "Phase 2" is not the production-readiness
+review's. Current state: [STATUS.md](../../../STATUS.md).
 
 ## Goal
 

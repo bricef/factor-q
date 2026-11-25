@@ -4,8 +4,10 @@ Plans describe **work**, not behaviour: what is being built, in what
 order, and how we'll know it's done. Each is named `YYYY-MM-DD-slug.md`
 (dated when the plan was opened) and lives in one of two folders:
 
-- **[`active/`](active/)** — work in flight. If code is changing on a
-  branch right now, the plan explaining it should be here.
+- **[`active/`](active/)** — work in flight, and work that is held or
+  parked but not abandoned; each plan's status line says which. If code
+  is changing on a branch right now, the plan explaining it should be
+  here.
 - **[`closed/`](closed/)** — completed or abandoned. A plan moves here,
   in the same change that ends the work, and becomes historical record:
   closed plans preserve the sequencing, verification results, and
