@@ -623,6 +623,7 @@ async fn a_row_without_the_calls_own_response_publishes_none() {
             }
             _ => Some("{\"envelope\": \"not an event\"".to_string()),
         };
+        let planted_copy = stored.clone();
         let db = world.worker_db().await;
         let planted_rows = sqlx::query(
             "UPDATE llm_dispatch SET response_event = ? WHERE response_event IS NOT NULL",
@@ -658,6 +659,21 @@ async fn a_row_without_the_calls_own_response_publishes_none() {
         assert!(
             (cost - billed()).abs() < 1e-12,
             "{planted}: the run's completed carries its cost, {cost}"
+        );
+        // A copy the resume did not publish stays on the row: an unreadable
+        // one is the call's history, and the error the resume logs says so.
+        let still_kept = world
+            .store
+            .unpublished_llm_responses(&world.invocation_id().to_string())
+            .await
+            .unwrap();
+        assert_eq!(
+            still_kept
+                .iter()
+                .map(|(_, kept)| kept.as_str())
+                .collect::<Vec<_>>(),
+            planted_copy.as_deref().into_iter().collect::<Vec<_>>(),
+            "{planted}: the row still keeps what it kept, and nothing else"
         );
     }
 }
