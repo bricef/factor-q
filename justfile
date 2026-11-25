@@ -907,11 +907,13 @@ check-version tag:
 # fq/fqd split. `just package-main` (the deploy bundle) adds fq-dashboard
 # and the Go adapters.
 # Build the release binaries (fq, fqd, fq-cas, fq-dashboard) for a target triple.
+# `--locked`: a release is built from the lockfile CI tested, never from a
+# fresh resolution, and a lockfile out of step with Cargo.toml fails the build.
 build-release target:
-    cargo build --release --target {{target}} -p fq-cli --bin fq
-    cargo build --release --target {{target}} -p fq-daemon --bin fqd
-    cargo build --release --target {{target}} -p fq-store --features cli --bin fq-cas
-    cargo build --release --target {{target}} -p fq-dashboard
+    cargo build --release --locked --target {{target}} -p fq-cli --bin fq
+    cargo build --release --locked --target {{target}} -p fq-daemon --bin fqd
+    cargo build --release --locked --target {{target}} -p fq-store --features cli --bin fq-cas
+    cargo build --release --locked --target {{target}} -p fq-dashboard
 
 # Rust binaries build into the workspace root target/ (#194), so their specs
 # use `.` as the crate dir; the Go adapters keep per-adapter target dirs.
