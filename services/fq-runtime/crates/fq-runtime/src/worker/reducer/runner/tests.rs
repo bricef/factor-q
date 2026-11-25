@@ -46,6 +46,10 @@ mod dropped_end_to_end;
 // A halt armed before a run's first WAL write (issue 1070).
 mod halted_before_first_write;
 
+// A billed call's failure whose events were lost before the run's `failed`
+// went out, reproduced on resume (issue 1108).
+mod lost_failure;
+
 /// Issue #9 precedence, checked at the boundary the runner uses to
 /// fill `AgentConfig.max_iterations`: per-agent override (if the
 /// definition sets one) wins; otherwise the daemon config default
