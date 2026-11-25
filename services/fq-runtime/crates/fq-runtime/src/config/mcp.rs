@@ -2,10 +2,11 @@
 //!
 //! Its own module for the same reason `[tools]` has one: the keys are a
 //! policy rather than a bag of numbers. Together they say that no
-//! server, however badly behaved, can stop the daemon booting or make
-//! it allocate without bound — deadlines on the two calls a start makes,
-//! caps on what discovery may return, a bound on one line of stdio, and
-//! how patiently a server that is down is tried again.
+//! server, however badly behaved, can stop the daemon booting, hold a
+//! run's setup, or make it allocate without bound — deadlines on the two
+//! calls a start makes and on reading a pinned resource, caps on what
+//! discovery may return, a bound on one line of stdio, and how
+//! patiently a server that is down is tried again.
 //!
 //! Every number is here rather than in code because an operator is the
 //! one who knows their servers: a locally-installed stdio server
@@ -36,6 +37,16 @@ pub struct McpConfig {
     /// as effective a wedge as one slow answer.
     #[serde(default = "default_discovery_timeout_secs")]
     pub discovery_timeout_secs: u64,
+    /// How long one `resources/read` of an agent's `static_resources`
+    /// pin may take at the start of a run, in seconds. Default 30. A pin
+    /// whose read runs out is handled like any pin that fails to read:
+    /// it is left out of the context, a warn line names it, and the run
+    /// goes on. Before this existed a server that accepted the read and
+    /// never answered held the run in setup, with its worker permit,
+    /// for as long as the daemon lived (#1040). Per pin, and pins are
+    /// read in turn, so a run with n pins can wait up to n times this.
+    #[serde(default = "default_resource_read_timeout_secs")]
+    pub resource_read_timeout_secs: u64,
     /// The most `tools/list` pages one discovery may follow. Default
     /// 100. A server that keeps returning a `next_cursor` — by design
     /// or through a cursor bug that never advances — is cut off here.
@@ -74,6 +85,10 @@ fn default_discovery_timeout_secs() -> u64 {
     30
 }
 
+fn default_resource_read_timeout_secs() -> u64 {
+    30
+}
+
 fn default_max_discovery_pages() -> u32 {
     100
 }
@@ -99,6 +114,7 @@ impl Default for McpConfig {
         Self {
             startup_timeout_secs: default_startup_timeout_secs(),
             discovery_timeout_secs: default_discovery_timeout_secs(),
+            resource_read_timeout_secs: default_resource_read_timeout_secs(),
             max_discovery_pages: default_max_discovery_pages(),
             max_tools: default_max_tools(),
             max_line_bytes: default_max_line_bytes(),
@@ -126,6 +142,9 @@ impl McpConfig {
         if self.discovery_timeout_secs == 0 {
             return zero("discovery_timeout_secs");
         }
+        if self.resource_read_timeout_secs == 0 {
+            return zero("resource_read_timeout_secs");
+        }
         if self.max_discovery_pages == 0 {
             return zero("max_discovery_pages");
         }
@@ -143,6 +162,7 @@ impl McpConfig {
         McpLimits {
             startup_timeout: Duration::from_secs(self.startup_timeout_secs),
             discovery_timeout: Duration::from_secs(self.discovery_timeout_secs),
+            resource_read_timeout: Duration::from_secs(self.resource_read_timeout_secs),
             max_discovery_pages: self.max_discovery_pages,
             max_tools: self.max_tools,
             max_line_bytes: self.max_line_bytes,

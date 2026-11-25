@@ -34,23 +34,46 @@ use super::{McpClient, McpError};
 #[derive(Clone, Default)]
 pub struct McpResourceReader {
     pub(super) clients: SharedClients,
+    /// The manager's bounds, for the read deadline (#1040).
+    pub(super) limits: McpLimits,
 }
 
 impl McpResourceReader {
-    /// Read a resource by `(server, uri)`.
+    /// Read a resource by `(server, uri)`, under `[mcp]
+    /// resource_read_timeout_secs`.
+    ///
+    /// rmcp sends `resources/read` with no timeout, so without this a
+    /// server that accepted the read and never answered held the run
+    /// reading its pins in setup, with its worker permit, for as long as
+    /// the daemon lived (#1040). rmcp's `read_resource` takes no request
+    /// options, so the deadline is a timeout around the call rather than
+    /// `PeerRequestOptions::with_timeout`. Dropping the call is enough to
+    /// cancel it: rmcp's cancel-on-drop guard sends the server
+    /// `notifications/cancelled` and forgets the request, and the
+    /// connection serves the next read.
     pub async fn read_resource(
         &self,
         server: &str,
         uri: &str,
     ) -> Result<ReadResourceResult, McpError> {
         let client = self.client_for(server)?;
-        client
-            .read_resource(ReadResourceRequestParams::new(uri))
-            .await
-            .map_err(|err| McpError::ResourceOp {
-                server: server.to_string(),
-                reason: err.to_string(),
-            })
+        let deadline = self.limits.resource_read_timeout;
+        let failed = |reason: String| McpError::ResourceOp {
+            server: server.to_string(),
+            reason,
+        };
+        tokio::time::timeout(
+            deadline,
+            client.read_resource(ReadResourceRequestParams::new(uri)),
+        )
+        .await
+        .map_err(|_| {
+            failed(format!(
+                "no answer within the {deadline:?} resource read deadline ([mcp] \
+                 resource_read_timeout_secs)"
+            ))
+        })?
+        .map_err(|err| failed(err.to_string()))
     }
 
     /// The client for one server, cloned out from under the lock — a

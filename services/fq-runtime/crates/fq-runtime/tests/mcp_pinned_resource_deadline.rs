@@ -102,10 +102,13 @@ const OMITTED: &str = "failed to read static_resources pin";
 /// default instead fails rather than passes slowly.
 const RUN_BOUND: Duration = Duration::from_secs(20);
 
-/// The `[mcp]` table this file runs under: the shipped defaults, which
-/// put no deadline on a read.
+/// The `[mcp]` table this file runs under: the shipped defaults, but a
+/// one-second read deadline, set the way an operator sets it.
 fn limits() -> McpLimits {
-    McpLimits::default()
+    fq_runtime::Config::from_toml_str("[mcp]\nresource_read_timeout_secs = 1\n")
+        .expect("resource_read_timeout_secs is an [mcp] key")
+        .mcp
+        .to_limits()
 }
 
 /// One of the two stand-ins, writing what it held and what it was told

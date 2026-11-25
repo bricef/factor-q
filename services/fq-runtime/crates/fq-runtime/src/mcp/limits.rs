@@ -1,14 +1,14 @@
 //! What one MCP server is allowed to cost the daemon: the deadlines
-//! start-up and discovery run under, the caps discovery and the stdio
-//! transport refuse past, and how often an unavailable server is tried
-//! again.
+//! start-up, discovery and a pinned resource's read run under, the caps
+//! discovery and the stdio transport refuse past, and how often an
+//! unavailable server is tried again.
 //!
-//! One value rather than seven arguments, because every one of these is
+//! One value rather than eight arguments, because every one of these is
 //! `[mcp]` in `fqd.toml` (Design Principle 8 — tunable parameters are
 //! configuration, not code) and they travel together: the manager
-//! applies the deadlines, discovery applies the caps, the stdio
-//! transport applies the line bound, and the retry loop applies the
-//! backoff.
+//! applies the start-up and discovery deadlines, the resource reader
+//! the read deadline, discovery applies the caps, the stdio transport
+//! applies the line bound, and the retry loop applies the backoff.
 //!
 //! Before they existed, boot blocked on the first unresponsive server:
 //! no deadline around the `initialize` handshake, `list_all_tools`
@@ -31,6 +31,10 @@ pub struct McpLimits {
     /// How long discovering a server's tools may take, across every
     /// page of `tools/list`.
     pub discovery_timeout: Duration,
+    /// How long one `resources/read` of a `static_resources` pin may
+    /// take at an invocation's start (#1040). Per pin: pins are read
+    /// in turn, so a run with n pins can wait up to n times this.
+    pub resource_read_timeout: Duration,
     /// The most `tools/list` pages one discovery may follow. A server
     /// that keeps returning a `next_cursor` is cut off here.
     pub max_discovery_pages: u32,
@@ -53,6 +57,7 @@ impl Default for McpLimits {
         Self {
             startup_timeout: Duration::from_secs(30),
             discovery_timeout: Duration::from_secs(30),
+            resource_read_timeout: Duration::from_secs(30),
             max_discovery_pages: 100,
             max_tools: 1_000,
             max_line_bytes: 1024 * 1024,

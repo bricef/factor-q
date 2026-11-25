@@ -126,6 +126,16 @@ static_resources:
   - "mcp://filesystem/file:///data/schema.json"
 ```
 
+Pins are best effort. A pin whose read fails, or whose server has not
+answered within `[mcp] resource_read_timeout_secs` (default 30), is
+left out of the opening prompt with a warning in the daemon log naming
+the server and the resource, and the run goes on without it. The
+deadline is per pin and pins are read one after another, so a run with
+n pins on a server that never answers waits up to n times the deadline
+before its first turn. Before the deadline existed, such a server held
+the run, and its worker slot, for as long as the daemon ran
+([#1040](https://github.com/bricef/factor-q/issues/1040)).
+
 The client also tracks `resources/updated` and `*_list_changed`
 notifications so cached lists don't go stale.
 
@@ -327,13 +337,14 @@ A grant-bearing server is not part of this: it runs per-invocation, so
 there is no standing state to report and a failure to start one stays a
 warning against that single run.
 
-Four bounds keep a misbehaving server from costing the daemon
+These bounds keep a misbehaving server from costing the daemon
 unboundedly, and every one of them is `[mcp]` in `fqd.toml`:
 
 | Key | Default | What it bounds |
 | --- | --- | --- |
 | `startup_timeout_secs` | 30 | the `initialize` handshake |
 | `discovery_timeout_secs` | 30 | the whole `tools/list` walk |
+| `resource_read_timeout_secs` | 30 | one read of a `static_resources` pin when a run starts, per pin |
 | `max_discovery_pages` | 100 | a server that returns a `next_cursor` for ever |
 | `max_tools` | 1000 | a server that advertises without end |
 | `max_line_bytes` | 1048576 | one JSON-RPC message on the stdio transport |
