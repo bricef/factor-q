@@ -359,9 +359,8 @@ out of the log is a hole in that claim.
   the batched shape *expressible*; changing what the harness emits is a
   separate behavioural fix with its own test coverage gap
   (`mock_anthropic.rs` builds responses carrying one `tool_use` block, so the
-  parallel path has no hermetic coverage today). Tracked as
-  [#511](https://github.com/bricef/factor-q/issues/511) so the shape change and
-  the behaviour change stay reviewable apart.
+  parallel path has no hermetic coverage today). It stays a change of its
+  own so the shape change and the behaviour change stay reviewable apart.
 
 ## References
 
