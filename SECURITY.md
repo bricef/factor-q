@@ -1,6 +1,6 @@
 # Security Policy
 
-factor-q is alpha software. This page is the canonical summary of its
+factor-q is pre-alpha software (see [STATUS.md](STATUS.md#maturity-pre-alpha)). This page is the canonical summary of its
 security posture, and it deliberately keeps two things apart: **what is
 enforced today** and **what the project intends to enforce**. The gap
 between them is a dated decision, not a gap in attention — the reasoning
@@ -139,5 +139,5 @@ execution, until stronger credential, network, and process isolation ships.
 
 ## Reporting a Vulnerability
 
-Whilst this project is in alpha (version < 1.0.0), please raise security
-issues as normal GitHub issues.
+Whilst this project is pre-alpha (no release has been tagged yet), please
+raise security issues as normal GitHub issues.
