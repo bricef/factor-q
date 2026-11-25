@@ -211,7 +211,7 @@ models = ["claude-haiku-4-5"]
 #   - the parallel-workers Phase-2 verification gate is green
 #     (concurrent recovery/drain/shutdown, and the shared base-MCP
 #     connection proven safe under concurrent reads — see
-#     docs/plans/active/2026-07-10-parallel-workers-worktree.md);
+#     docs/plans/closed/2026-07-10-parallel-workers-worktree.md);
 #   - you accept the spend profile: each in-flight invocation spends
 #     budget in parallel, up to this bound — which covers every run,
 #     startup recovery's resumes and `fq invocation resume` included
