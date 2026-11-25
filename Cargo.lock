@@ -1396,7 +1396,7 @@ dependencies = [
 
 [[package]]
 name = "fq-agent"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "fq-ops",
  "fq-test-support",
@@ -1412,7 +1412,7 @@ dependencies = [
 
 [[package]]
 name = "fq-cli"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1437,7 +1437,7 @@ dependencies = [
 
 [[package]]
 name = "fq-daemon"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "async-nats",
@@ -1467,7 +1467,7 @@ dependencies = [
 
 [[package]]
 name = "fq-dashboard"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -1491,7 +1491,7 @@ dependencies = [
 
 [[package]]
 name = "fq-edge"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "biscuit-auth",
@@ -1514,7 +1514,7 @@ dependencies = [
 
 [[package]]
 name = "fq-lint"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1524,7 +1524,7 @@ dependencies = [
 
 [[package]]
 name = "fq-ops"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -1540,7 +1540,7 @@ dependencies = [
 
 [[package]]
 name = "fq-runtime"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "async-nats",
  "async-trait",
@@ -1577,7 +1577,7 @@ dependencies = [
 
 [[package]]
 name = "fq-store"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "async-nats",
  "async-trait",
@@ -1604,7 +1604,7 @@ dependencies = [
 
 [[package]]
 name = "fq-test-support"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "async-nats",
  "futures",
@@ -1616,7 +1616,7 @@ dependencies = [
 
 [[package]]
 name = "fq-tools"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "async-trait",
  "fq-test-support",

@@ -891,7 +891,7 @@ both roles, and that is the only shape that ships.
 $ fqd
 factor-q runtime starting
   runtime id:       01997c4e-9b1a-7c33-8f0d-2a5b6c7d8e9f
-  version:          0.1.0
+  version:          0.0.1
   NATS:             nats://127.0.0.1:4222
   agent directory:  ./agents
   cache directory:  /home/op/.cache/factor-q

@@ -11,7 +11,7 @@
 # (https://github.com/bricef/factor-q/issues/405).
 #
 # Environment overrides:
-#   FQ_VERSION       version to install (e.g. 0.1.0 or v0.1.0; default: latest)
+#   FQ_VERSION       version to install (e.g. 0.0.1 or v0.0.1; default: latest)
 #   FQ_INSTALL_DIR   install directory (default: $HOME/.local/bin)
 #   FQ_RELEASE_BASE  where the release assets are fetched from — a mirror,
 #                    or a local server when testing this script (default:
