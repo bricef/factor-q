@@ -50,6 +50,10 @@ mod halted_before_first_write;
 // went out, reproduced on resume (issue 1108).
 mod lost_failure;
 
+// A successful call's `llm.response` whose publish was lost, published on
+// resume, on the harness of the lost failure (issue 1168).
+mod lost_response;
+
 /// Issue #9 precedence, checked at the boundary the runner uses to
 /// fill `AgentConfig.max_iterations`: per-agent override (if the
 /// definition sets one) wins; otherwise the daemon config default

@@ -134,6 +134,8 @@ pub struct RecordingSink {
     refused: Mutex<Vec<Event>>,
     max_payload: AtomicUsize,
     fail_at: AtomicUsize,
+    /// One-shot fault after the publish (see [`Self::lose_ack_at`]).
+    lose_ack_at: AtomicUsize,
     /// One-shot fault keyed by per-invocation publish count (see
     /// [`Self::fail_publish_at_invocation_count`]); the per-invocation
     /// counts live in `per_invocation_published`.
@@ -159,6 +161,7 @@ impl RecordingSink {
             refused: Mutex::new(Vec::new()),
             max_payload: AtomicUsize::new(SIM_MAX_PAYLOAD),
             fail_at: AtomicUsize::new(usize::MAX),
+            lose_ack_at: AtomicUsize::new(usize::MAX),
             fail_at_invocation_count: Mutex::new(None),
             per_invocation_published: Mutex::new(std::collections::HashMap::new()),
             drain_arm: Mutex::new(None),
@@ -179,6 +182,14 @@ impl RecordingSink {
         self.fail_at.store(index, Ordering::SeqCst);
     }
 
+    /// Inject a fault after the publish with this zero-based index: the
+    /// event reaches the stream, and the publisher is told the publish
+    /// failed, once. The broker stored it and the acknowledgement was
+    /// lost, or the daemon stopped before it acted on it.
+    pub fn lose_ack_at(&self, index: usize) {
+        self.lose_ack_at.store(index, Ordering::SeqCst);
+    }
+
     /// Inject a fault keyed by *per-invocation* publish count
     /// (parallel-workers Phase 2): the first invocation to attempt its
     /// `nth` (zero-based) publish fails that one publish, exactly once.
@@ -193,6 +204,7 @@ impl RecordingSink {
     /// Clear the fault so a resumed run can publish normally.
     pub fn clear_fault(&self) {
         self.fail_at.store(usize::MAX, Ordering::SeqCst);
+        self.lose_ack_at.store(usize::MAX, Ordering::SeqCst);
         *self.fail_at_invocation_count.lock().unwrap() = None;
     }
 
@@ -270,6 +282,12 @@ impl EventSink for RecordingSink {
         }
         drop(arm);
         events.push(event.clone());
+        if events.len() - 1 == self.lose_ack_at.load(Ordering::SeqCst) {
+            self.lose_ack_at.store(usize::MAX, Ordering::SeqCst);
+            return Err(BusError::Publish(
+                "sim: the event landed and its acknowledgement was lost".to_string(),
+            ));
+        }
         // The sim's "stream sequence": 1-based position in the recorded
         // log — deterministic, monotonic, exactly what JetStream would
         // hand back.
