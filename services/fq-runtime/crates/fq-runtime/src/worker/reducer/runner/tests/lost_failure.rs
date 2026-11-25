@@ -486,24 +486,31 @@ async fn a_stop_after_both_of_the_calls_events_does_not_count_its_cost_twice() {
 }
 
 /// A row that keeps no `llm.failure` (one closed before worker schema
-/// v13), or one that is not this call's (only a hand edit makes one):
-/// nothing is published in its name. The run still ends on its `failed`,
-/// which carries the run's totals, the failed call's cost among them.
+/// v13), or keeps one this build cannot publish as the call's: another
+/// call's, another run's, or text that is not an event (only a hand edit
+/// makes these). Nothing is published in the call's name. The run still
+/// ends on its `failed`, which carries the run's totals, the failed call's
+/// cost among them.
 #[tokio::test]
 async fn a_row_without_the_calls_own_failure_publishes_none() {
-    for planted in ["none", "another call's"] {
+    for planted in ["none", "another call's", "another run's", "not an event"] {
         let world = a_world().await;
         world.stopped_at_publish(AT_FAILURE, "llm_failure").await;
+        let mut other = world.sink.refused()[0].clone();
         let stored = match planted {
             "none" => None,
-            _ => {
-                let mut other = world.sink.refused()[0].clone();
+            "another call's" => {
                 let EventPayload::LlmFailure(payload) = &mut other.payload else {
                     unreachable!()
                 };
                 payload.call_id = Uuid::now_v7();
                 Some(serde_json::to_string(&other).unwrap())
             }
+            "another run's" => {
+                other.envelope.invocation_id = Uuid::now_v7();
+                Some(serde_json::to_string(&other).unwrap())
+            }
+            _ => Some("{\"envelope\": \"not an event\"".to_string()),
         };
         let db = world.worker_db().await;
         let planted_rows = sqlx::query(
