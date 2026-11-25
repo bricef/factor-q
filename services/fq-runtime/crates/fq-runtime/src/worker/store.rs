@@ -825,10 +825,26 @@ impl WorkerStore {
         cost_usd: f64,
         completed_at: i64,
     ) -> Result<(), WorkerStoreError> {
+        let closed = (response, is_error, cost_usd, completed_at);
+        self.close_llm_dispatch(invocation_id, request_id, closed, None)
+            .await
+    }
+
+    /// `dispatched` → `completed`, with the call's `(response, is_error,
+    /// cost_usd, completed_at)` and the `llm.failure` a failed call ends in
+    /// (`store/llm_failure.rs`), all in one statement.
+    async fn close_llm_dispatch(
+        &self,
+        invocation_id: &str,
+        request_id: &str,
+        (response, is_error, cost_usd, completed_at): (&str, bool, f64, i64),
+        failure_event: Option<&str>,
+    ) -> Result<(), WorkerStoreError> {
         let res = sqlx::query(
             r#"
             UPDATE llm_dispatch
             SET status = ?, response = ?, is_error = ?, cost_usd = ?, completed_at = ?,
+                failure_event = ?,
                 seq = 1 + MAX(
                     COALESCE((SELECT MAX(seq) FROM tool_dispatch WHERE invocation_id = ?), 0),
                     COALESCE((SELECT MAX(seq) FROM llm_dispatch WHERE invocation_id = ?), 0)
@@ -841,6 +857,7 @@ impl WorkerStore {
         .bind(is_error as i64)
         .bind(cost_usd)
         .bind(completed_at)
+        .bind(failure_event)
         .bind(invocation_id)
         .bind(invocation_id)
         .bind(invocation_id)

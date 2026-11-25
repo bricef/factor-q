@@ -485,6 +485,44 @@ async fn a_stop_after_both_of_the_calls_events_does_not_count_its_cost_twice() {
     left.assert_the_run_ended().await;
 }
 
+/// The call's `llm.failure` goes onto its row in the write that closes the
+/// row, not in a write of its own: a stop at the close leaves the row as it
+/// was, `dispatched` and keeping nothing. Keeping the event adds no write
+/// a stop can fall after, which would leave the row `dispatched`, a call a
+/// resume cannot tell the outcome of, once the outcome was known. The stop
+/// is staged by failing the close.
+#[tokio::test]
+async fn the_calls_failure_is_kept_by_the_write_that_closes_its_row() {
+    let world = a_world().await;
+    let db = world.worker_db().await;
+    sqlx::query(
+        "CREATE TRIGGER the_daemon_stops \
+         BEFORE UPDATE OF status ON llm_dispatch \
+         WHEN NEW.status = 'completed' AND NEW.is_error = 1 \
+         BEGIN SELECT RAISE(ABORT, 'the daemon stopped'); END",
+    )
+    .execute(&db)
+    .await
+    .unwrap();
+    let outcome = world.run().await;
+    assert!(
+        matches!(outcome, Err(ExecutorError::WorkerStore(_))),
+        "the stop: {outcome:?}"
+    );
+    let open: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT status, failure_event FROM llm_dispatch WHERE status != 'completed'",
+    )
+    .fetch_all(&db)
+    .await
+    .unwrap();
+    db.close().await;
+    assert_eq!(
+        open,
+        [("dispatched".to_string(), None)],
+        "the failing call's row is as the stop found it"
+    );
+}
+
 /// A row that keeps no `llm.failure` (one closed before worker schema
 /// v13), or keeps one this build cannot publish as the call's: another
 /// call's, another run's, or text that is not an event (only a hand edit

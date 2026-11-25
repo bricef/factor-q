@@ -25,8 +25,8 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     /// "the call failed" from "the event was lost" (#447).
     ///
     /// Both events are made before the WAL writes, chained as they will
-    /// go out, and the row keeps the `llm.failure` before it is closed
-    /// (`store/llm_failure.rs`): it is the only event carrying the call's
+    /// go out, and the write that closes the row keeps the `llm.failure` on
+    /// it (`store/llm_failure.rs`): it is the only event carrying the call's
     /// usage and cost, and a resume that finds the run in flight publishes
     /// that very event again, so a stop before it went out loses neither
     /// figure, and one after it does not count them twice (issue 1108).
@@ -96,18 +96,13 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             .map_err(map_store_err)?;
         self.config
             .store
-            .write_llm_failure_event(&inv_str, &req_str, &failure)
-            .await
-            .map_err(map_store_err)?;
-        self.config
-            .store
-            .write_llm_completed(
+            .write_llm_failed(
                 &inv_str,
                 &req_str,
                 &call.error_message,
-                true,
                 total_cost,
                 self.config.clock.unix_now_ms(),
+                &failure,
             )
             .await
             .map_err(map_store_err)?;

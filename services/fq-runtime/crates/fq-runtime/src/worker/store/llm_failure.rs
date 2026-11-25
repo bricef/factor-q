@@ -14,7 +14,7 @@
 //! publishes lost the figure from the stream for good: the next start
 //! found the row closed and reproduced only the run's `failed`, so no
 //! cost report ever counted the call. Now the row keeps the event, written
-//! before the row is closed, and a resume publishes it again.
+//! by the statement that closes the row, and a resume publishes it again.
 //!
 //! The column holds the **whole event, envelope included**, as the wire
 //! JSON, for the reason `terminal_outcome` does: a republish is then the
@@ -77,39 +77,25 @@ impl WorkerStore {
         Ok(())
     }
 
-    /// Keep on a call's row the `llm.failure` it ends in, before the row
-    /// is closed, so every row this build closes `is_error` keeps one. Only
-    /// a `dispatched` row takes it, the state a row is closed from.
-    pub async fn write_llm_failure_event(
+    /// Close a failed call's row, `dispatched` → `completed` with
+    /// `is_error`, its cost, and the `llm.failure` it ends in, in the one
+    /// statement `write_llm_completed` closes a row with. So every row this
+    /// build closes as failed keeps its event, and keeping it adds no write
+    /// after which a stop would leave the row `dispatched`.
+    pub async fn write_llm_failed(
         &self,
         invocation_id: &str,
         request_id: &str,
-        event: &Event,
+        error_message: &str,
+        cost_usd: f64,
+        completed_at: i64,
+        failure: &Event,
     ) -> Result<(), WorkerStoreError> {
-        let encoded = serde_json::to_string(event)
+        let encoded = serde_json::to_string(failure)
             .map_err(|err| WorkerStoreError::Malformed(err.to_string()))?;
-        let res = sqlx::query(
-            r#"
-            UPDATE llm_dispatch
-            SET failure_event = ?
-            WHERE invocation_id = ? AND request_id = ? AND status = ?
-            "#,
-        )
-        .bind(encoded)
-        .bind(invocation_id)
-        .bind(request_id)
-        .bind(DispatchStatus::Dispatched.as_str())
-        .execute(&self.pool)
-        .await?;
-        if res.rows_affected() == 0 {
-            return Err(WorkerStoreError::WalTransitionFailed {
-                entity: "llm_dispatch",
-                invocation_id: invocation_id.to_string(),
-                call_id: request_id.to_string(),
-                reason: "no row in `dispatched` state".to_string(),
-            });
-        }
-        Ok(())
+        let closed = (error_message, true, cost_usd, completed_at);
+        self.close_llm_dispatch(invocation_id, request_id, closed, Some(&encoded))
+            .await
     }
 
     /// The `llm.failure` a call's row keeps, as it was stored: `None` for a
