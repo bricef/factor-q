@@ -149,7 +149,11 @@ the step re-issues the model call with a fresh `call_id`. The stamp is
 per row because the state row's `phase` is one column the next step
 boundary overwrites: a deferral, a resume, a real failure whose terminal
 was lost, and a second resume must reproduce the real failure, not the
-deferral. The delay is the
+deferral. Reproducing it publishes that call's own `llm.failure` again,
+from the copy its row keeps, then the run's `failed` with the run's
+totals ([#1108](https://github.com/bricef/factor-q/issues/1108)). The
+deferral's row keeps its own `llm.failure` too, and a stamped row is
+skipped with it. The delay is the
 larger of what the provider asked for and the model's escalating default,
 so an invocation that keeps meeting a two-second `Retry-After` backs off
 anyway. A resume that meets another 429 is deferred again; a daemon that

@@ -235,6 +235,22 @@ Same shape. LLM calls touch external systems and cost money;
 crashing mid-call leaves the same ambiguity. The same
 three-state record applies.
 
+A call that fails is closed `completed` with `is_error` and its
+cost, and only then are its `llm.dispatched` and `llm.failure`
+published. The `llm.failure` is the only event that carries the
+call's usage and cost, so the row keeps it, envelope and
+`event_id` included, written before the row is closed
+(`llm_dispatch.failure_event`, worker schema v13,
+[#1108](https://github.com/bricef/factor-q/issues/1108)). A crash
+after the close and before the run's terminal mark leaves the run
+in flight with that row; the next start reproduces the failure
+from it, publishing the kept `llm.failure` first and then the
+run's `failed`, whose totals are rebuilt from the run's rows. A
+copy of `llm.failure` that had already reached the stream is the
+same event: the stream's `Nats-Msg-Id` dedup drops the second
+inside its 120 s window, and the projection's upsert on
+`event_id` keeps one row past it, so the cost is counted once.
+
 ### 4.3 Reducer state
 
 Between any two `step` calls, the reducer's state blob is
@@ -885,7 +901,7 @@ factor-q runtime starting
   control-plane db: /home/op/.cache/factor-q/control-plane.db
   projection db:    /home/op/.cache/factor-q/projection.db
   control plane:    v1
-  worker schema:    v12
+  worker schema:    v13
   worker:           01997c4e-9b1a-7c33-8f0d-2a5b6c7d8e9f (host: prod-1)
   in-flight:        3 (1 safe-resume, 1 safe-replay, 1 ambiguous)
   pricing entries:  62 (cache: /home/op/.cache/factor-q/pricing.json)

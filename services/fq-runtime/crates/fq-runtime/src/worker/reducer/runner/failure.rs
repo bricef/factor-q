@@ -24,6 +24,13 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     /// with no outcome and a consumer folding the pair could not tell
     /// "the call failed" from "the event was lost" (#447).
     ///
+    /// Both events are made before the WAL writes, chained as they will
+    /// go out, and the row keeps the `llm.failure` before it is closed
+    /// (`store/llm_failure.rs`): it is the only event carrying the call's
+    /// usage and cost, and a resume that finds the run in flight publishes
+    /// that very event again, so a stop before it went out loses neither
+    /// figure, and one after it does not count them twice (issue 1108).
+    ///
     /// The failure is stamped with a Round exactly as a response is
     /// ([`RoundLedger::for_call`](crate::worker::reducer::rounds::RoundLedger::for_call)):
     /// a failed agent turn consumes one, because a Round is a model turn
@@ -60,11 +67,36 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // like any other: money the provider took is money spent.
         totals.total_cost += total_cost;
 
+        // Chained here as `publish_chained` will chain them, so the
+        // `llm.failure` the row keeps is the one published.
+        let mut dispatched = Event::new(
+            call.agent_id.clone(),
+            call.invocation_id,
+            EventPayload::LlmDispatched(events::LlmDispatchedPayload {
+                call_id: call.call_id,
+                model: call.model.to_string(),
+            }),
+        );
+        dispatched.envelope.parent_event_id = *cursor;
+        let mut failure = emit::llm_failure_event(
+            self.rounds.for_call(call.invocation_id, call.origin),
+            &call,
+            priced,
+            totals.total_cost,
+            table.version(),
+        );
+        failure.envelope.parent_event_id = Some(dispatched.envelope.event_id);
+
         let inv_str = call.invocation_id.to_string();
         let req_str = call.call_id.to_string();
         self.config
             .store
             .write_llm_dispatched(&inv_str, &req_str, self.config.clock.unix_now_ms())
+            .await
+            .map_err(map_store_err)?;
+        self.config
+            .store
+            .write_llm_failure_event(&inv_str, &req_str, &failure)
             .await
             .map_err(map_store_err)?;
         self.config
@@ -80,28 +112,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             .await
             .map_err(map_store_err)?;
 
-        self.publish_chained(
-            cursor,
-            Event::new(
-                call.agent_id.clone(),
-                call.invocation_id,
-                EventPayload::LlmDispatched(events::LlmDispatchedPayload {
-                    call_id: call.call_id,
-                    model: call.model.to_string(),
-                }),
-            ),
-        )
-        .await?;
-        self.publish_chained(
-            cursor,
-            emit::llm_failure_event(
-                self.rounds.for_call(call.invocation_id, call.origin),
-                &call,
-                priced,
-                totals.total_cost,
-                table.version(),
-            ),
-        )
-        .await
+        self.publish_chained(cursor, dispatched).await?;
+        self.publish_chained(cursor, failure).await
     }
 }

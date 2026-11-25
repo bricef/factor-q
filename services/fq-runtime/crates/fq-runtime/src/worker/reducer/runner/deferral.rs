@@ -8,6 +8,10 @@
 //! on the bus, and is resumed after a delay. No `failed` event, no
 //! terminal, no retry consumed anywhere.
 //!
+//! It also holds the other reading of an errored model-call row on
+//! resume: a failure whose ending was lost, which is reproduced, with the
+//! call's own `llm.failure` and the run's totals (issue 1108).
+//!
 //! A child of `runner.rs` for the same reason `failure.rs` is: the
 //! runner's config and store stay private, and the runner file may only
 //! shrink.
@@ -17,6 +21,7 @@ use std::time::Duration;
 use tracing::warn;
 use uuid::Uuid;
 
+use super::publish_failure::Refused;
 use super::{InvocationCtx, ReducerRunner, map_store_err};
 use crate::agent::AgentId;
 use crate::events::{
@@ -24,8 +29,9 @@ use crate::events::{
     InvocationTotals,
 };
 use crate::worker::ExecutorError;
+use crate::worker::reducer::rounds::totals_of_llm_rows;
 use crate::worker::reducer::types::Reducer;
-use crate::worker::store::LlmDispatchRow;
+use crate::worker::store::{DispatchStatus, LlmDispatchRow, ToolDispatchRow};
 
 /// The `invocation_state.phase` a deferred row carries, for the stuck
 /// sweep and the operator surface. Not a classifier: the phase is one
@@ -94,30 +100,93 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     /// instead of trying to replay the row (finding 6, caught by the
     /// slice-7 deep soak: resume previously died on a deserialise error
     /// here). Always returns `Err`.
+    ///
+    /// The crash may have lost the call's own `llm.failure` too, the only
+    /// event carrying its usage and cost, so the row's stored copy goes
+    /// out first, the very event, and the run's `failed` after it, carrying
+    /// the run's totals as its rows record them (`llms` and `tools`, the
+    /// run's WAL rows), not zeros (issue 1108). The `llm.failure` goes out
+    /// before the run's row is marked finished, the `failed` is stored in
+    /// that mark, so a stop between the two leaves the run for the next
+    /// start to reproduce again. A copy of `llm.failure` that had reached
+    /// the stream already is the same event, and counts once
+    /// (`store/llm_failure.rs` says how).
     pub(super) async fn reproduce_lost_failure(
         &self,
         agent_id: &AgentId,
         invocation_id: Uuid,
         row: &LlmDispatchRow,
+        llms: &[LlmDispatchRow],
+        tools: &[ToolDispatchRow],
     ) -> Result<crate::worker::InvocationOutcome, ExecutorError> {
         let message = row
             .response
             .clone()
             .unwrap_or_else(|| "provider error (no detail recorded)".to_string());
+        let totals = recorded_totals(llms, tools);
         let mut cursor: Option<Uuid> = None;
+        if let Some((failure, encoded_len)) = self.stored_llm_failure(invocation_id, row).await? {
+            // An `llm.failure` the broker would refuse for its size ends the
+            // run on the refusal's `failed`, as a live run's does (#828),
+            // rather than leave it in flight for every start to refuse.
+            if let Some(refused) = Refused::measure(&*self.config.sink, &failure, encoded_len) {
+                let failed = refused.failed_event(agent_id, invocation_id, totals);
+                self.fail_mid_step(&mut cursor, agent_id, failed).await?;
+                return Err(refused.failure());
+            }
+            self.publish_chained(&mut cursor, failure).await?;
+        }
         self.emit_failed(
             agent_id,
             invocation_id,
             FailureKind::LlmError,
             format!("{message} (reproduced on resume)"),
             FailurePhase::LlmRequest,
-            InvocationTotals::default(),
+            totals,
             &mut cursor,
         )
         .await?;
         Err(ExecutorError::Llm(crate::llm::LlmError::RequestFailed(
             message,
         )))
+    }
+
+    /// The `llm.failure` the failed call's row keeps, with its length on
+    /// the wire, when it is one this build can publish as that call's: read
+    /// back as every consumer of the log reads an event, and naming this run
+    /// and this call. Anything else is logged and not published, and the
+    /// run's `failed` still carries the call's cost in its totals. `None`
+    /// too for a row closed before the row kept one (worker schema v13).
+    async fn stored_llm_failure(
+        &self,
+        invocation_id: Uuid,
+        row: &LlmDispatchRow,
+    ) -> Result<Option<(Event, usize)>, ExecutorError> {
+        let Some(stored) = self
+            .config
+            .store
+            .llm_failure_event(&row.invocation_id, &row.request_id)
+            .await
+            .map_err(map_store_err)?
+        else {
+            return Ok(None);
+        };
+        let event = Event::from_wire(stored.as_bytes()).ok().filter(|event| {
+            event.envelope.invocation_id == invocation_id
+                && matches!(
+                    &event.payload,
+                    EventPayload::LlmFailure(failure) if failure.call_id.to_string() == row.request_id
+                )
+        });
+        if event.is_none() {
+            warn!(
+                invocation_id = %invocation_id,
+                call_id = %row.request_id,
+                "the failed call's row keeps an event this build cannot publish as its \
+                 llm.failure; the call's cost reaches only the run's failed"
+            );
+        }
+        Ok(event.map(|event| (event, stored.len())))
     }
 
     /// Set `phase = "deferred"` on the invocation's state row, keeping
@@ -156,4 +225,18 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         }
         Err(self.finished_elsewhere(invocation_id, "its row write did not land"))
     }
+}
+
+/// A run's totals as its WAL rows record them, by the rule a resume
+/// rebuilds them by ([`totals_of_llm_rows`]), with the tool calls that
+/// completed. The duration stays zero: it is the attempt's, and a
+/// reproduction runs nothing.
+fn recorded_totals(llms: &[LlmDispatchRow], tools: &[ToolDispatchRow]) -> InvocationTotals {
+    let (mut totals, _rounds) = totals_of_llm_rows(llms);
+    let completed_tools = tools
+        .iter()
+        .filter(|row| row.status == DispatchStatus::Completed)
+        .count();
+    totals.total_tool_calls = u32::try_from(completed_tools).unwrap_or(u32::MAX);
+    totals
 }

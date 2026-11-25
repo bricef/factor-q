@@ -70,7 +70,10 @@
 //! (`terminal.rs`), which measures every `failed` before storing it, so
 //! one over the broker's limit, a provider's long error text say, is
 //! replaced by this `payload_too_large` `failed`, and the run ends with its
-//! row finished like any other.
+//! row finished like any other. The lost failure's path also publishes the
+//! call's stored `llm.failure` first (issue 1108); it measures that event
+//! too, and one the broker would refuse ends the run on this `failed`
+//! instead, as the live run's refused `llm.failure` would have.
 //!
 //! The `failed` always fits. It shares nothing with the event refused:
 //! no history, no output, no state. It is a fixed set of short fields —
@@ -191,7 +194,7 @@ impl Refused {
     }
 
     /// What the run returns once its `failed` is out.
-    fn failure(&self) -> ExecutorError {
+    pub(super) fn failure(&self) -> ExecutorError {
         ExecutorError::InvocationFailed {
             kind: FailureKind::PayloadTooLarge,
             message: self.message(),

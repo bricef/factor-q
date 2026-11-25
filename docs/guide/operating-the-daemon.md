@@ -1055,6 +1055,19 @@ request being refused and is not retried at all. The `llm.failure`
 event's `error_kind` says which of these happened — `timeout`,
 `rate_limited`, `rejected` or `request_failed`.
 
+A call that fails can still have been billed: an empty answer is
+charged for its prompt, and its `llm.failure` carries that usage and
+cost. The worker records the failed call, its cost and that event
+before it publishes anything. If the daemon stops before the run's
+`failed` is out, the next start ends the run from that record: it
+publishes the call's `llm.failure` again, the same event, then the
+run's `failed` with the run's totals
+([#1108](https://github.com/bricef/factor-q/issues/1108)). A copy that
+had gone out before the stop is the same event, with the same id, so
+`fq costs` counts the call once; the broker drops the second copy if
+the restart comes within two minutes, and past that the event trail
+can show it twice.
+
 A 429 also does three things fleet-wide, through the per-model provider
 throttle ([#278](https://github.com/bricef/factor-q/issues/278); design
 in

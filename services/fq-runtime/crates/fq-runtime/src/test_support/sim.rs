@@ -1795,10 +1795,10 @@ mod resume_equivalence {
         // before the `failed` is published (issue 1070), so the last
         // publish before it is the call's own `llm.failure`, the third of
         // the resumed chain after its request and dispatched: faulting
-        // that one is the crash, with row B written and no terminal. It
-        // is the fault issue 1108 names: a billed call's cost would not
-        // reach the stream, and the reproduced `failed` carries no totals.
-        // This call is not billed, and the test asserts nothing on spend.
+        // that one is the crash, with row B written and no terminal. Both
+        // rows keep the `llm.failure` they ended in (issue 1108); the
+        // reproduction must publish B's, the one lost, and not A's, which
+        // went out with its deferral.
         let published = world.sink.events().len();
         let resume_llm = FixtureClient::new();
         resume_llm.push_error(crate::llm::LlmError::RequestFailed(
@@ -1812,6 +1812,15 @@ mod resume_equivalence {
             failed_messages(&world.sink.events()).is_empty(),
             "the terminal was lost to the crash"
         );
+        let lost = world.sink.refused();
+        let [lost] = &lost[..] else {
+            panic!("one lost publish: {lost:?}");
+        };
+        assert!(
+            matches!(lost.payload, crate::events::EventPayload::LlmFailure(_)),
+            "the crash lost row B's llm.failure: {lost:?}"
+        );
+        let before = world.sink.events().len();
 
         // The second resume reproduces the failure that was lost — B's.
         let err = world
@@ -1832,6 +1841,19 @@ mod resume_equivalence {
         assert_eq!(
             messages[0], "request failed: sim: provider gave up (reproduced on resume)",
             "the reproduced failure carries row B's message, not the deferral's"
+        );
+        let republished: Vec<Event> = world.sink.events()[before..]
+            .iter()
+            .filter(|e| matches!(e.payload, crate::events::EventPayload::LlmFailure(_)))
+            .cloned()
+            .collect();
+        let [republished] = &republished[..] else {
+            panic!("one llm.failure republished: {republished:?}");
+        };
+        assert_eq!(
+            serde_json::to_value(republished).unwrap(),
+            serde_json::to_value(lost).unwrap(),
+            "the reproduction republishes row B's lost llm.failure, itself"
         );
     }
 
