@@ -30,7 +30,7 @@ the previous, launcher-based shape was
   — lives in the named volume `fq-dogfood_fq-data` at
   `/var/lib/factor-q`. Backing up or moving the instance is that volume
   plus the broker's `fq-dogfood_nats-data`.
-- **Compose is the supervisor.** Six services with `restart:
+- **Compose is the supervisor.** Seven services with `restart:
   unless-stopped`, health ordering on the broker, rotated logs, resource
   limits on the daemon ([compose.yml](compose.yml)). No systemd units;
   the host's init starts the container runtime and nothing else of ours.
@@ -792,7 +792,7 @@ one ever needs packaging again.
    variable, the agents and cache directories — in one place, so a
    packaged set and a live sync cannot disagree.
 
-7. **Accept the move before trusting it.** Six services running and
+7. **Accept the move before trusting it.** Seven services running and
    healthy in `docker compose ps`; `fq status` reporting the tag, the
    expected agent count and every consumer caught up;
    `fq invocation list` and `fq costs` showing the history that came

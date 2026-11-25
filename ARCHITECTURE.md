@@ -152,14 +152,20 @@ modules and types that implement them.
 
 ### Event bus (`fq-runtime/src/bus.rs`)
 
-Three JetStream streams (plus the advisory capture stream):
+Three JetStream streams, plus `fq-advisories`, which captures the
+broker's advisory for a trigger that ran out of deliveries:
 
-- **`fq-events`** — subjects `fq.agent.>` and `fq.system.>`,
-  Limits retention (30 days), S2 compression. Holds the full
-  event trail: agent lifecycle events plus system lifecycle events
-  (startup, shutdown, task failure).
+- **`fq-events`** — subjects `fq.agent.>`, `fq.system.>` and
+  `fq.worker.>`, Limits retention (30 days by default, `[events]
+  max_age`), S2 compression. Holds the full event trail: agent
+  lifecycle events, system events (startup, shutdown, task failure,
+  recovery, maintenance runs, operator signals) and worker events
+  (heartbeats, `worker.orphaned`, archive acks).
 - **`fq-triggers`** — subject `fq.trigger.>`, Limits retention
-  (24 hours). Holds pending agent triggers. The daemon publishes them,
+  (24 hours). Holds pending agent triggers, which the dispatcher's
+  durable consumer delivers at most five times on a retry ladder; a
+  `MAX_DELIVERIES` advisory for one is captured in `fq-advisories`,
+  where the daemon's advisory watch turns it into a dead letter. The daemon publishes them,
   on its own behalf for `fq trigger` (the `trigger.publish` command) and
   for the first-party adapters that write the subject directly under the
   trigger wire contract.
@@ -230,7 +236,8 @@ before comparison:
 - `fs_read` — file_read tool
 - `fs_write` — file_write tool
 - `exec_cwd` — exec tool (working directory)
-- `env` — (declared in agent defs, plumbing to exec tool deferred)
+- `env` — exec tool: the names of the daemon's environment
+  variables copied into the child; nothing else is inherited
 
 Path traversal (`..`) and symlinks are resolved to their real
 filesystem location before the containment check. Sandbox
@@ -253,7 +260,9 @@ Seven, in the order `ToolRegistry::with_builtins_exec` registers them
 | `report_outcome` | `report_outcome.rs` | none — host-fulfilled; the reducer harness intercepts it as the terminal transition, so it is the only way an invocation reaches `Complete` with a declared status (#125) |
 
 The exec tool uses argv (no shell invocation), mandatory timeout,
-output cap, and a fresh child env with only a pinned PATH.
+output cap, and a fresh child env: a pinned `PATH`, the variables the
+agent's `sandbox.env` names, and the runtime's own `FQ_INVOCATION_ID`,
+`FQ_AGENT_ID` and `FQ_MODEL`.
 
 Whatever a tool returns, built-in or MCP, error or not, the runner
 caps once more at `[tools] max_result_bytes` (256 KiB by default),
@@ -288,7 +297,7 @@ left out like any pin that fails to read; every bound is `[mcp]` in
 
 ### Projection consumer (`fq-runtime/src/control_plane/projection/`)
 
-A durable JetStream consumer on `fq.agent.>` + `fq.system.>` that
+A durable JetStream consumer on the whole `fq-events` stream that
 materialises every event into its own SQLite database
 (`projection.db` — one file per store since the #262 split; the
 worker WAL and control-plane state live in `worker.db` and
@@ -304,12 +313,24 @@ trigger records wherever they sit, are kept.
 ### Trigger dispatcher (`fq-runtime/src/control_plane/dispatcher.rs`)
 
 A durable JetStream consumer on `fq.trigger.>` that dispatches
-incoming trigger messages to the correct agent. Extracts the agent id
-from the NATS subject, looks it up in the registry, parses the JSON
-payload, and runs the invocation. Errors are acked (not NAK'd)
-because unknown agent ids, invalid payloads and executor errors are
-permanent problems a retry would not fix, and the worker already
-emits `Failed` events for them.
+incoming trigger messages to the correct agent. Before anything else,
+each delivery is arbitrated against a durable claim row in the
+control-plane store, keyed on the stream's incarnation and the
+message's sequence, so a redelivered copy of a trigger that is held or
+has durably started starts nothing
+([ADR-0032](docs/adrs/accepted/0032-exactly-once-trigger-dispatch.md)).
+Then it extracts the agent id from the NATS subject, looks it up in the
+registry, parses the JSON payload, waits for admission (a worker permit,
+the agent's own `max_concurrent`, a model the throttle has not paused),
+and runs the invocation. A failure a retry could fix, before the
+invocation's first WAL write, is NAK'd and redelivered on the retry
+ladder (30 seconds, then 2, 5 and 12 minutes); a trigger that fails
+all five deliveries is dead-lettered, 19.5 minutes after its first. A
+trigger dealt with and not run (an unknown agent, a payload that is not
+JSON, a permanent failure before the first WAL write) is not retried:
+its claim is recorded `consumed` and the delivery is acked
+([ADR-0038](docs/adrs/accepted/0038-a-trigger-dealt-with-and-not-run-keeps-its-claim-consumed.md)).
+A run that fails after it has started emits its own `failed` event.
 
 The trigger is acked on **durable start** — the invocation's first
 WAL write, signalled through the `Worker` seam — not on dispatch and
@@ -329,24 +350,42 @@ running run ([#721](https://github.com/bricef/factor-q/issues/721)).
 
 ### Pricing (`fq-runtime/src/pricing.rs`)
 
-`PricingTable` loads the LiteLLM pricing JSON at startup (fetched
-from GitHub, cached locally, fallback to stale cache on network
-failure). Provides cost calculation for ~2000 models across
-providers.
+`PricingTable` prices every model an agent may use. The source is the
+live LiteLLM pricing table (`[pricing] source`, fetched and cached
+under the cache directory), and the daemon is strict about what it
+accepts from it: a price that moves further than `[pricing]
+max_drift_ratio` keeps its prior value and raises a
+`pricing.change_refused` notification, and a table older than
+`[pricing] max_age` raises `pricing.stale`. Models declared under a
+provider whose `base_url` is openrouter.ai are priced from OpenRouter's
+own catalogue, and a per-model override in `fqd.toml` wins over both.
+The daemon refuses to start with a declared model it cannot price
+(ADR-0004). The
+[operating guide](docs/guide/operating-the-daemon.md#pricing-the-live-table-and-what-the-daemon-accepts-from-it)
+has the rules.
 
 ### System lifecycle events
 
-Three system event types on `fq.system.*`:
+The lifecycle events on `fq.system.*`:
 
 - `system_startup` — emitted when `fqd` connects and is ready
-- `system_shutdown` — emitted on clean Ctrl-C or task-failure exit
-- `system_task_failed` — emitted when the projection consumer or
-  trigger dispatcher exits unexpectedly
+- `system_shutdown` — emitted when the daemon stops: on `fq down`,
+  Ctrl-C, SIGTERM, or after a hosted task failed
+- `system_task_failed` — emitted when a hosted task exits unexpectedly
+- `system_recovery` — once per start, the counts of in-flight
+  invocations startup recovery found, by how it classified them
 
-`fqd` watches both hosted tasks via `tokio::select!`. If
-either dies before a Ctrl-C, the daemon publishes
-`system.task_failed`, shuts down the other task, and exits
-non-zero.
+The same subject family carries `mcp_server_log`
+(`fq.system.mcp.log`), `maintenance_run` (`fq.system.maintenance`) and
+`operator_signal` (`fq.system.operator_signal`).
+
+`fqd` supervises every hosted task in one `tokio::select!`: the
+projection, coordination, heartbeat, summary, maintenance and
+archive-ack consumers, the advisory watch, the heartbeat producer, the
+archive retry sweeper, the retention sweeper and the trigger
+dispatcher. If one exits before the daemon was asked to stop, the
+daemon publishes `system.task_failed` naming it, tears the rest down,
+and exits non-zero.
 
 ### API layer — the authenticated edge (`fq-ops/`, `fq-edge/`)
 
@@ -413,6 +452,15 @@ that serves it. `bin/fq.rs` is a shim. The daemon is not here — it is the
 | `fq status` | Runtime overview — `control.status` over the edge: the daemon's build, its stream and consumer health, its live agent registry, its projection position and its recovery counts. The one migrated read that still answers with no daemon: it reports the absence as the finding, keeps the genuinely local half — the edge address this client dials, and nothing else — and exits non-zero. The store paths are *not* local: they belong to the process that owns those files, so they travel on the daemon's report and are absent, with the reason, when none arrives |
 | `fq doctor` | Durable-execution health in one report — `control.doctor` over the edge. A composite over workers, current work, ambiguity, failures and trigger claims that never settled; needs the daemon it reports on, and says so when there is none |
 
+The table covers the core verbs. The others are `fq reload`,
+`fq down`, `fq connect`, `fq version`, `fq invocation`
+(`list`, `show`, `drop`, `resume`, `transcript`), `fq workers`
+(`list`, `show`), `fq dead-letters` (`list`, `requeue`),
+`fq notifications` (`list`, `show`), `fq projection rebuild`,
+`fq ops list` and `fq token attenuate`. `fq --help` lists them all, and
+the [operating guide](docs/guide/operating-the-daemon.md) says how to
+use them.
+
 ### Content store (`services/fq-store`)
 
 A separate service crate — the storage substrate the Memory and
@@ -440,20 +488,22 @@ of the
   localhost-only and unauthenticated until M5.
 
 Layer 2 (extraction) and layer 3 (embedding + retrieval) are
-M3–M5, next on the active plan.
+M3–M5 of that plan, which is parked and not scheduled.
 
 ### Deployment (`ops/dogfood/`)
 
 The deployable unit is a container image
 ([ADR-0035](docs/adrs/accepted/0035-container-image-and-compose-supervision.md)):
-every merge to `main` publishes one image per binary to `ghcr.io/bricef`
-— `fq-runtime` (the daemon on distroless, the bare envelope it is held
+every merge to `main` publishes six images to `ghcr.io/bricef` —
+`fq-runtime` (the daemon on distroless, the bare envelope it is held
 to), `fq-dogfood` (the same binaries plus the toolchain the fleet's
 agents run, the transitional shape until worker and control plane
-split), `github-watcher`, `fq-cron`, `fq-dashboard` — tagged with the
-twelve-hex commit the binary inside reports, assembled from the same
-musl binaries as the tarball channel. Docker compose is the stack
-definition and the supervisor (`ops/dogfood/compose.yml`: six services,
+split), `github-watcher`, `fq-cron`, `fq-dashboard`, and `fq-ops` (the
+stack's own deploy, hygiene and backup scripts and their schedule,
+[ADR-0036](docs/adrs/accepted/0036-ops-image-and-scheduler-service.md))
+— each tagged with the twelve-hex commit it was built from, the binary
+images assembled from the same musl binaries as the tarball channel. Docker compose is the stack
+definition and the supervisor (`ops/dogfood/compose.yml`: seven services,
 restart policy, health ordering, a stop grace period above the drain
 deadline; no systemd units). Everything the daemon persists lives in one
 volume at `/var/lib/factor-q`. A deploy is a tag bump with a drain,
@@ -473,9 +523,12 @@ These subsystems from the vision are not implemented:
 - Task engine (fan-out/fan-in, dependency graph)
 - Agent graph / multi-agent orchestration
 - Memory system (the memory *servers* per ADR-0013; the MCP *client* that would consume them is implemented — see the [MCP guide](docs/guide/mcp.md))
-- Skill registry (AgentSkills format — scoped to phase 2)
+- Skill registry (AgentSkills format, ADR-0019 — in the parked
+  MCP, memory and skills plan)
 - Continuous learning
 - Container-level isolation (ADR-0010 accepted: containers by default, Kata+Firecracker upgrade path — the daemon is *packaged* as a container under ADR-0035, but agents run inside it; the isolation model is unbuilt)
-- Observability floor beyond `fq status` (JSON logs landed, #36;
-  metrics + lag alerting tracked in
-  [#342](https://github.com/bricef/factor-q/issues/342))
+- Observability beyond `fq status`, `fq doctor` and JSON logs
+  (`--log-format json`,
+  [#36](https://github.com/bricef/factor-q/issues/36)): no metrics
+  export and no alerting yet
+  ([#342](https://github.com/bricef/factor-q/issues/342))
