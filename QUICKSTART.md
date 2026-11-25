@@ -177,7 +177,7 @@ redeploy (suspend in-flight work for the next binary to resume), use
 |---|---|---|
 | `fq status` says no daemon answered. | The daemon isn't running, or this client was never paired with it. | Start it (`fqd`), then `fq connect <edge-addr> --token <token>`. |
 | `fq status` shows a stream as unavailable. | NATS isn't running, or the daemon never provisioned it. | `just infra-up`; check `just infra-status`. |
-| `fq trigger` says "LLM authentication failed". | `ANTHROPIC_API_KEY` is unset or invalid. | Re-export the variable in the same shell that runs `fq`. |
+| A run ends `failed` with "authentication failed" (watch it with `fq events tail`; `fq trigger` itself returns as soon as the trigger is queued). | `ANTHROPIC_API_KEY` is unset or invalid in the **daemon's** environment — the daemon makes the model call, not the client. | Export the variable in the shell that starts the daemon (`just run`), and restart the daemon. |
 | `fq trigger` exits with "agent not found". | The **daemon's** agents directory does not hold that definition — the client no longer looks at agent files at all, it asks the daemon. | Fix `[agents] directory` in `fqd.toml` and `fq reload`, or start the daemon from the project directory. |
 | Tools fail with "path not in sandbox". | The agent's `sandbox.fs_read` / `fs_write` / `exec_cwd` doesn't include the path the model tried to use. | Edit the agent definition's sandbox section; nothing is granted by default. |
 | `just up` complains about a port. | Something else is using port 4222 (NATS) or 8222. | Stop the conflicting service or edit `infrastructure/docker-compose.yml`. |
