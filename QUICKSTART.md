@@ -100,7 +100,7 @@ Then run `just fq trigger sample-agent ...` again. You'll see each event scroll 
 
 There is no separate `cost` event: spend rides on the envelope of the event that incurred it (`envelope.cost`), which is why `fq costs` can total a run without replaying a second stream.
 
-`fq events tail --agent sample-agent` narrows to one agent. `fq events tail --event-type tool_call` narrows to all tool calls across all agents; the flag takes one of `triggered`, `llm_request`, `llm_response`, `llm_failure`, `tool_call`, `tool_result`, `completed`, `failed`. The two compose, and they are the same narrowing `fq events query` takes; see [`docs/design/committed/event-schema.md`](docs/design/committed/event-schema.md) for every event type.
+`fq events tail --agent sample-agent` narrows to one agent. `fq events tail --event-type tool_call` narrows to all tool calls across all agents; the flag takes an event type's name, such as `triggered`, `llm_request`, `llm_response`, `llm_failure`, `tool_call`, `tool_result`, `completed` or `failed`. The two compose, and they are the same narrowing `fq events query` takes; see [`docs/design/committed/event-schema.md`](docs/design/committed/event-schema.md) for every event type.
 
 ## 7. Query history and costs
 

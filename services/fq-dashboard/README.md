@@ -63,7 +63,7 @@ the environment and passes nothing.
 | `--edge` | `FQ_EDGE` | `127.0.0.1:9472` | the daemon's `[edge] bind` — see the port collision below |
 | `--edge-token` | `FQ_EDGE_TOKEN` | *(required)* | the attenuated token |
 | `--edge-fingerprint` | `FQ_EDGE_FINGERPRINT` | *(required)* | the daemon's certificate SHA-256, hex |
-| `--refresh` | `FQ_DASHBOARD_REFRESH` | `5` | poll interval, seconds |
+| `--refresh` | `FQ_DASHBOARD_REFRESH` | `5` | browser auto-refresh interval, seconds |
 
 `fq-dashboard probe` asks the running dashboard's `GET /healthz` at
 `--bind` and exits 0 on 200 — the container image's `HEALTHCHECK`, so
