@@ -798,6 +798,7 @@ mod tests {
         let config = Config::from_toml_str("").unwrap();
         assert_eq!(config.mcp.startup_timeout_secs, 30);
         assert_eq!(config.mcp.discovery_timeout_secs, 30);
+        assert_eq!(config.mcp.resource_read_timeout_secs, 30);
         assert_eq!(config.mcp.max_discovery_pages, 100);
         assert_eq!(config.mcp.max_tools, 1_000);
         assert_eq!(config.mcp.max_line_bytes, 1024 * 1024);
@@ -807,6 +808,7 @@ mod tests {
 
         let config = Config::from_toml_str(
             "[mcp]\nstartup_timeout_secs = 5\ndiscovery_timeout_secs = 7\n\
+             resource_read_timeout_secs = 13\n\
              max_discovery_pages = 3\nmax_tools = 11\nmax_line_bytes = 4096\n\
              retry_initial_secs = 1\nretry_max_secs = 9\n",
         )
@@ -816,6 +818,7 @@ mod tests {
             crate::mcp::McpLimits {
                 startup_timeout: Duration::from_secs(5),
                 discovery_timeout: Duration::from_secs(7),
+                resource_read_timeout: Duration::from_secs(13),
                 max_discovery_pages: 3,
                 max_tools: 11,
                 max_line_bytes: 4096,
@@ -836,6 +839,7 @@ mod tests {
         for key in [
             "startup_timeout_secs",
             "discovery_timeout_secs",
+            "resource_read_timeout_secs",
             "max_discovery_pages",
             "max_tools",
             "max_line_bytes",

@@ -1357,11 +1357,11 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     /// agent declares no pins, when no resource handle is wired,
     /// or when none of the pins could be read.
     ///
-    /// Best-effort by design: a pin that fails to read is logged
-    /// and skipped rather than failing the invocation. The host
-    /// curates these for guaranteed *inclusion*, but a transient
-    /// read failure against a third-party server should degrade
-    /// to "context omitted", not "invocation dead".
+    /// Best-effort by design: a pin that fails to read, or is not
+    /// answered within `[mcp] resource_read_timeout_secs` (#1040),
+    /// is logged and skipped rather than failing the invocation. The
+    /// host curates these for guaranteed *inclusion*, but a failed
+    /// read should degrade to "context omitted", not "invocation dead".
     async fn read_static_resources(&self, agent: &Agent) -> Option<String> {
         let pins = agent.static_resources();
         if pins.is_empty() {

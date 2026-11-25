@@ -675,7 +675,10 @@ static_resources:
 
 Pinned resources are read once at invocation start and injected into
 the opening prompt. Use this for context the agent always needs (a
-schema, a style guide, project facts).
+schema, a style guide, project facts). A pin that cannot be read, or
+whose server does not answer within the daemon's `[mcp]
+resource_read_timeout_secs`, is left out with a warning in the daemon
+log and the run goes on without it (see [MCP](mcp.md#resources)).
 
 ### Capability grants
 

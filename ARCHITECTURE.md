@@ -281,7 +281,9 @@ carries a state — starting, ready, or unavailable — that `fq doctor` and
 `control.status` report; an unavailable server is retried on a doubling
 backoff, and an agent that declares one is refused at dispatch with a
 terminal event naming it. Discovery has a page cap and a tool-count cap,
-and the stdio transport a bounded line length; every bound is `[mcp]` in
+the stdio transport a bounded line length, and each read of an agent's
+pinned resource at the start of a run a deadline, past which the pin is
+left out like any pin that fails to read; every bound is `[mcp]` in
 `fqd.toml`. See the [MCP guide](docs/guide/mcp.md).
 
 ### Projection consumer (`fq-runtime/src/control_plane/projection/`)

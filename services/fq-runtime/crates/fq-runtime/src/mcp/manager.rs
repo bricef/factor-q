@@ -492,9 +492,11 @@ impl McpClientManager {
     /// A cloneable read-only handle for reading resources from the
     /// currently-running servers — used to inject `static_resources`
     /// at invocation start without sharing the manager's lifecycle.
+    /// Each read runs under this manager's resource read deadline.
     pub fn resource_reader(&self) -> McpResourceReader {
         McpResourceReader {
             clients: Arc::clone(&self.clients),
+            limits: self.limits.clone(),
         }
     }
 

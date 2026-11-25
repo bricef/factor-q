@@ -482,6 +482,15 @@ models = ["claude-haiku-4-5"]
 # Default 30.
 # discovery_timeout_secs = 30
 #
+# How long one read of an agent's `static_resources` pin may take when
+# a run starts, in seconds. Default 30. A pin whose read runs out is
+# treated like one whose read failed: it is left out of the run's
+# opening context, a warning in the daemon log names the server and the
+# resource, and the run goes on. The deadline is per pin, and pins are
+# read one after another, so a run with three pins on a server that
+# never answers waits up to three times this before it starts.
+# resource_read_timeout_secs = 30
+#
 # The most `tools/list` pages one discovery may follow. Default 100. A
 # server that keeps returning a `next_cursor` — by design, or through a
 # cursor bug that never advances — is cut off here and marked
