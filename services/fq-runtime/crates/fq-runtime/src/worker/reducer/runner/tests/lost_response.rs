@@ -396,6 +396,92 @@ async fn a_resume_publishes_the_last_calls_lost_response_alone() {
     assert_the_run_ended_with_its_cost_counted_once(&world, &resumed, from).await;
 }
 
+/// The resume that publishes a lost `llm.response` lets the row's copy go
+/// once it is out, as the live run does: when that resume stops too, at its
+/// next publish, the one after it publishes the response no more.
+#[tokio::test]
+async fn a_response_published_again_is_not_published_by_the_next_resume() {
+    let world = a_world().await;
+    let asked = stopped_at(&world, FIRST_RESPONSE, "llm_response").await;
+    world.sink.clear_fault();
+    world.sink.fail_publish_at(world.sink.events().len() + 1);
+    let rest = model(&answers()[asked.requests().len()..]);
+    let stopped_again = world
+        .runner
+        .resume(&world.agent, &rest, world.invocation_id())
+        .await;
+    assert!(
+        matches!(stopped_again, Err(ExecutorError::Bus(_))),
+        "the second stop: {stopped_again:?}"
+    );
+    assert_eq!(
+        world
+            .sink
+            .refused()
+            .last()
+            .map(|event| event.payload.event_type()),
+        Some("tool_call"),
+        "the second stop falls after the response went out again"
+    );
+    let from = world.sink.events().len();
+    let resumed = resumed(&world, &asked).await;
+    assert_each_response_once(&world.sink.events());
+    assert_the_run_ended_with_its_cost_counted_once(&world, &resumed, from).await;
+}
+
+/// The lost `llm.response` is the one of the call that took the run over
+/// its budget. The resume publishes it before the `failed` the budget
+/// check on resume ends the run with, so the call's cost is on the stream,
+/// and that `failed` chains on from it.
+#[tokio::test]
+async fn a_lost_response_goes_out_before_the_budget_ends_the_run() {
+    // Two dollars at the test's rates, against a budget of one.
+    const OVER: (u32, u32) = (2_000_000, 0);
+    let world = a_world().await;
+    world.sink.fail_publish_at(FIRST_RESPONSE);
+    let outcome = world
+        .run_with(&model(&[tool_use(TOOL, "tc-0", json!({}), OVER)]))
+        .await;
+    assert!(
+        matches!(outcome, Err(ExecutorError::Bus(_))),
+        "the stop: {outcome:?}"
+    );
+    let from = world.sink.events().len();
+    world.sink.clear_fault();
+    let resumed = world
+        .runner
+        .resume(&world.agent, &FixtureClient::new(), world.invocation_id())
+        .await;
+    assert!(
+        matches!(resumed, Ok(InvocationOutcome::BudgetExceeded { .. })),
+        "the budget ends the run: {resumed:?}"
+    );
+    let events = world.sink.events();
+    let kinds: Vec<&str> = events[from..]
+        .iter()
+        .map(|event| event.payload.event_type())
+        .collect();
+    assert_eq!(
+        kinds,
+        ["llm_response", "failed", "invocation_archived"],
+        "the resume's events"
+    );
+    let cost = events[from]
+        .envelope
+        .cost
+        .as_ref()
+        .expect("the call is priced");
+    assert!(
+        (cost.total_cost - cost_of(usage(OVER.0, OVER.1))).abs() < 1e-12,
+        "the call's cost: {cost:?}"
+    );
+    assert_eq!(
+        events[from + 1].envelope.parent_event_id,
+        Some(events[from].envelope.event_id),
+        "the failed chains on from it"
+    );
+}
+
 /// The call's `llm.response` goes onto its row in the write that closes
 /// the row, not in a write of its own: a stop at the close leaves the row as
 /// it was, `dispatched` and keeping nothing. Keeping the event adds no
