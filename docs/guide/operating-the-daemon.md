@@ -90,8 +90,10 @@ pointing you at `fq status` / `fq workers list`, rather than a false
 > It needs a pairing, like every other verb that asks the daemon
 > something (`fq connect`). Confirmation is the daemon's edge going
 > away — the process itself, not a message it sent on the way out, which
-> is what the retired `fq.system.shutdown` wait observed. There is still
-> no PID/supervisor registry (a supervised `fq up` story is future work),
+> is what the retired `fq.system.shutdown` wait observed. `fq` keeps no
+> PID or supervisor registry (where a supervisor exists, as on the
+> dogfood stack, it is docker compose:
+> [ADR-0035](../adrs/accepted/0035-container-image-and-compose-supervision.md)),
 > so `fq down` confirms *the daemon it was paired with is no longer
 > serving*, not an OS-level process check. With no daemon to reach, it
 > fails at once rather than waiting out the drain deadline.
