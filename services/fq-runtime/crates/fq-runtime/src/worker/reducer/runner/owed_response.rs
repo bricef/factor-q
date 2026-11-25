@@ -21,13 +21,13 @@
 //! A child of `runner.rs`, as `deferral.rs` is, so the runner's config,
 //! store and publish chain stay private.
 
-use tracing::warn;
+use tracing::{error, warn};
 use uuid::Uuid;
 
 use super::publish_failure::Refused;
 use super::{ReducerRunner, map_store_err};
 use crate::agent::AgentId;
-use crate::events::{Event, EventPayload};
+use crate::events::{Event, EventParseError, EventPayload};
 use crate::worker::ExecutorError;
 use crate::worker::reducer::rounds::totals_of_wal_rows;
 use crate::worker::reducer::types::Reducer;
@@ -99,14 +99,30 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             .map_err(map_store_err)?;
         let mut cursor = None;
         for (request_id, stored) in owed {
-            let Some(event) = owed_response(invocation_id, &request_id, &stored) else {
-                warn!(
-                    invocation_id = %invocation_id,
-                    call_id = %request_id,
-                    "the call's row keeps an event this build cannot publish as its \
-                     llm.response; the call's cost reaches only the run's totals"
-                );
-                continue;
+            let event = match owed_response(invocation_id, &request_id, &stored, llms) {
+                Owed::Publish(event) => *event,
+                Owed::Unreadable { error, cost_usd } => {
+                    error!(
+                        invocation_id = %invocation_id,
+                        call_id = %request_id,
+                        cost_usd = ?cost_usd,
+                        error = %error,
+                        "the call's row keeps an llm.response this build cannot read, so it \
+                         is not published: the call's cost reaches no llm.response and no \
+                         cost report, only the run's totals; the copy stays on the row"
+                    );
+                    continue;
+                }
+                Owed::NotTheCalls => {
+                    warn!(
+                        invocation_id = %invocation_id,
+                        call_id = %request_id,
+                        "the call's row keeps an event that is not its llm.response; \
+                         nothing is published, and the call's cost reaches only the run's \
+                         totals"
+                    );
+                    continue;
+                }
             };
             if let Some(refused) = Refused::measure(&*self.config.sink, &event, stored.len()) {
                 let totals = totals_of_wal_rows(llms, tools);
@@ -129,15 +145,59 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     }
 }
 
-/// `stored`, read back as every consumer of the log reads an event, when
-/// it is one this build can publish as the call's `llm.response`: naming
-/// this run and this call. Anything else is `None`.
-fn owed_response(invocation_id: Uuid, request_id: &str, stored: &str) -> Option<Event> {
-    Event::from_wire(stored.as_bytes()).ok().filter(|event| {
-        event.envelope.invocation_id == invocation_id
-            && matches!(
-                &event.payload,
-                EventPayload::LlmResponse(response) if response.call_id.to_string() == request_id
-            )
-    })
+/// What a resume makes of one copy a row keeps. Decided apart from the
+/// publish and the log, so a test can read the decision.
+#[derive(Debug)]
+enum Owed {
+    /// The call's own `llm.response`, naming this run and this call: it is
+    /// published.
+    Publish(Box<Event>),
+    /// A copy this build cannot read as every consumer of the log reads an
+    /// event: an envelope `schema_version` it does not read, or a shape it
+    /// does not know, as after a deploy across an event-schema change, the
+    /// very restart that resumes the run. That is the call's history, not
+    /// garbage, and its cost then reaches no `llm.response`, so the loss is
+    /// logged at error with `cost_usd`, the cost the call's row records.
+    /// The copy stays on the row, and the run goes on.
+    Unreadable {
+        error: EventParseError,
+        cost_usd: Option<f64>,
+    },
+    /// A readable event that is not this run's and this call's
+    /// `llm.response`: only a hand edit makes one. Logged at warn.
+    NotTheCalls,
 }
+
+/// Read `stored`, the copy the row of call `request_id` keeps, as every
+/// consumer of the log reads an event, and decide what becomes of it.
+/// `llms` are the run's rows, for the cost an unreadable copy carries.
+fn owed_response(
+    invocation_id: Uuid,
+    request_id: &str,
+    stored: &str,
+    llms: &[LlmDispatchRow],
+) -> Owed {
+    let event = match Event::from_wire(stored.as_bytes()) {
+        Ok(event) => event,
+        Err(error) => {
+            let cost_usd = llms
+                .iter()
+                .find(|row| row.request_id == request_id)
+                .and_then(|row| row.cost_usd);
+            return Owed::Unreadable { error, cost_usd };
+        }
+    };
+    let the_calls = event.envelope.invocation_id == invocation_id
+        && matches!(
+            &event.payload,
+            EventPayload::LlmResponse(response) if response.call_id.to_string() == request_id
+        );
+    if the_calls {
+        Owed::Publish(Box::new(event))
+    } else {
+        Owed::NotTheCalls
+    }
+}
+
+#[cfg(test)]
+mod tests;
