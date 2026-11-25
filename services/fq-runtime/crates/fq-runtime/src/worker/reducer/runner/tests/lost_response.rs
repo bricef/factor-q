@@ -429,6 +429,70 @@ async fn a_response_published_again_is_not_published_by_the_next_resume() {
     assert_the_run_ended_with_its_cost_counted_once(&world, &resumed, from).await;
 }
 
+/// The resume's own republish fails: the broker is still down at the next
+/// start. The row lets its copy go only once a publish has returned, so it
+/// still keeps it, and the start after that publishes it: the call's
+/// `llm.response` reaches the stream once, and the projection counts the
+/// cost once.
+#[tokio::test]
+async fn a_republish_that_fails_leaves_the_copy_for_the_next_start() {
+    let world = a_world().await;
+    let asked = stopped_at(&world, FIRST_RESPONSE, "llm_response").await;
+    let lost = world.sink.refused()[0].clone();
+    world.sink.clear_fault();
+    world.sink.fail_publish_at(world.sink.events().len());
+    let rest = model(&answers()[asked.requests().len()..]);
+    let failed_again = world
+        .runner
+        .resume(&world.agent, &rest, world.invocation_id())
+        .await;
+    assert!(
+        matches!(failed_again, Err(ExecutorError::Bus(_))),
+        "the resume's republish fails: {failed_again:?}"
+    );
+    let refused = world.sink.refused();
+    assert_same_event(
+        refused.last().expect("the resume's publish was refused"),
+        &lost,
+        "the resume's first publish is the kept response",
+    );
+    let kept = world
+        .store
+        .unpublished_llm_responses(&world.invocation_id().to_string())
+        .await
+        .unwrap();
+    let [(_, stored)] = &kept[..] else {
+        panic!("the row still keeps one copy: {kept:?}");
+    };
+    assert_same_event(
+        &Event::from_wire(stored.as_bytes()).unwrap(),
+        &lost,
+        "the row still keeps the copy the failed resume could not publish",
+    );
+    assert!(
+        !world
+            .sink
+            .events()
+            .iter()
+            .any(|event| matches!(event.payload, EventPayload::LlmResponse(_))),
+        "nothing has published it yet"
+    );
+    let from = world.sink.events().len();
+    let resumed = resumed(&world, &asked).await;
+    let events = world.sink.events();
+    let copies = copies_of_response(&events, 0);
+    let [first] = &copies[..] else {
+        panic!("the first call's llm.response, one copy: {copies:?}");
+    };
+    assert_same_event(
+        first,
+        &lost,
+        "the next start publishes the kept copy, itself",
+    );
+    assert_each_response_once(&events);
+    assert_the_run_ended_with_its_cost_counted_once(&world, &resumed, from).await;
+}
+
 /// The lost `llm.response` is the one of the call that took the run over
 /// its budget. The resume publishes it before the `failed` the budget
 /// check on resume ends the run with, so the call's cost is on the stream,
