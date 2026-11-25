@@ -28,7 +28,7 @@ use crate::test_support::sim::{RecordingSink, ScriptedTool};
 use fq_tools::ToolResult;
 
 /// The tool the run's first turn asks for.
-const TOOL: &str = "lost_failure_tool";
+pub(super) const TOOL: &str = "lost_failure_tool";
 
 /// The run's first call asks for the tool and is billed for this many
 /// tokens in and out.
@@ -44,7 +44,7 @@ const EMPTY_PROMPT: u32 = 1_000;
 const AT_DISPATCHED: usize = 8;
 const AT_FAILURE: usize = 9;
 
-fn usage(input: u32, output: u32) -> TokenUsage {
+pub(super) fn usage(input: u32, output: u32) -> TokenUsage {
     TokenUsage {
         input_tokens: input,
         output_tokens: output,
@@ -57,7 +57,7 @@ fn usage(input: u32, output: u32) -> TokenUsage {
 }
 
 /// What `usage` costs at the test's rates.
-fn cost_of(usage: TokenUsage) -> f64 {
+pub(super) fn cost_of(usage: TokenUsage) -> f64 {
     test_pricing()
         .lookup("claude-haiku")
         .expect("priced")
@@ -91,15 +91,15 @@ fn model() -> FixtureClient {
 }
 
 /// One run's runner, store and agent, publishing through a recording sink.
-struct World {
-    runner: ReducerRunner<Harness>,
-    store: Arc<WorkerStore>,
-    sink: Arc<RecordingSink>,
-    agent: Agent,
-    dir: tempfile::TempDir,
+pub(super) struct World {
+    pub(super) runner: ReducerRunner<Harness>,
+    pub(super) store: Arc<WorkerStore>,
+    pub(super) sink: Arc<RecordingSink>,
+    pub(super) agent: Agent,
+    pub(super) dir: tempfile::TempDir,
 }
 
-async fn a_world() -> World {
+pub(super) async fn a_world() -> World {
     let dir = tempdir().unwrap();
     let store = Arc::new(
         WorkerStore::open(&dir.path().join("worker.db"))
@@ -145,13 +145,16 @@ impl World {
         self.run_with(&model()).await
     }
 
-    async fn run_with(&self, llm: &FixtureClient) -> Result<InvocationOutcome, ExecutorError> {
+    pub(super) async fn run_with(
+        &self,
+        llm: &FixtureClient,
+    ) -> Result<InvocationOutcome, ExecutorError> {
         self.runner
             .run(&self.agent, llm, TriggerSource::Manual, None, json!("go"))
             .await
     }
 
-    fn invocation_id(&self) -> Uuid {
+    pub(super) fn invocation_id(&self) -> Uuid {
         self.sink
             .events()
             .iter()
@@ -193,7 +196,7 @@ impl World {
 
     /// The worker's store as a second connection sees it, for the stop
     /// that falls between two writes of the run's own.
-    async fn worker_db(&self) -> sqlx::SqlitePool {
+    pub(super) async fn worker_db(&self) -> sqlx::SqlitePool {
         sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
             .connect_with(
@@ -273,7 +276,7 @@ struct Left {
 
 /// Two copies of one event, compared in full: id, time, parent, payload
 /// and annotations, as a reader of either would see them.
-fn assert_same_event(left: &Event, right: &Event, what: &str) {
+pub(super) fn assert_same_event(left: &Event, right: &Event, what: &str) {
     assert_eq!(
         serde_json::to_value(left).unwrap(),
         serde_json::to_value(right).unwrap(),
