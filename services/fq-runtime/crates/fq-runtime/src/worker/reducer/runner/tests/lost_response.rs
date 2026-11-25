@@ -585,13 +585,21 @@ async fn the_calls_response_is_kept_by_the_write_that_closes_its_row() {
 
 /// A row that keeps an event this build cannot publish as the call's
 /// `llm.response`: another call's, another run's, or text that is not an
-/// event (only a hand edit makes these), or none at all, as a row closed
-/// before worker schema v14 keeps. Nothing is published in the call's
-/// name, and the run goes on to its end; its `completed` still carries the
-/// call's cost in its totals.
+/// event (only a hand edit makes these), the call's own written under an
+/// envelope version this build does not read (a deploy across an
+/// event-schema change), or none at all, as a row closed before worker
+/// schema v14 keeps. Nothing is published in the call's name, and the run
+/// goes on to its end; its `completed` still carries the call's cost in
+/// its totals. What is logged for each is `owed_response/tests.rs`'s.
 #[tokio::test]
 async fn a_row_without_the_calls_own_response_publishes_none() {
-    for planted in ["none", "another call's", "another run's", "not an event"] {
+    for planted in [
+        "none",
+        "another call's",
+        "another run's",
+        "another envelope version",
+        "not an event",
+    ] {
         let world = a_world().await;
         let asked = stopped_at(&world, FIRST_RESPONSE, "llm_response").await;
         let mut other = world.sink.refused()[0].clone();
@@ -607,6 +615,11 @@ async fn a_row_without_the_calls_own_response_publishes_none() {
             "another run's" => {
                 other.envelope.invocation_id = Uuid::now_v7();
                 Some(serde_json::to_string(&other).unwrap())
+            }
+            "another envelope version" => {
+                let mut value = serde_json::to_value(&other).unwrap();
+                value["envelope"]["schema_version"] = 99.into();
+                Some(serde_json::to_string(&value).unwrap())
             }
             _ => Some("{\"envelope\": \"not an event\"".to_string()),
         };

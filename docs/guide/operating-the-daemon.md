@@ -1078,7 +1078,11 @@ The next start publishes that `llm.response` before the run goes on
 `fq costs` counts the call once and `fq invocation turns` shows its
 turn.
 Restart the daemon to get there; a drop ends the run without
-publishing it. The event trail shows the response twice only if the
+publishing it. If the build the restart brings cannot read the kept
+event, because the event schema changed between the two builds, it
+publishes nothing for it and logs an error naming the run, the call and
+the cost the worker recorded for it; the run goes on, and that cost is
+in the run's totals only. The event trail shows the response twice only if the
 daemon stopped in the moment between the broker taking it and the
 worker recording that, and the restart came more than two minutes
 later. A drain stops runs at a step boundary, after that moment.
