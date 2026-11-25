@@ -1068,6 +1068,21 @@ had gone out before the stop is the same event, with the same id, so
 the restart comes within two minutes, and past that the event trail
 can show it twice.
 
+A call that succeeds is recorded the same way: the worker keeps its
+`llm.response`, the event that carries the call's usage and cost,
+until the publish returns. If that publish fails, because the broker
+is down or unreachable, or the daemon stops at it, the run stops there
+and stays in flight, with the call's cost in the worker's store only.
+The next start publishes that `llm.response` before the run goes on
+([#1168](https://github.com/bricef/factor-q/issues/1168)), so
+`fq costs` counts the call once and `fq invocation turns` shows its
+turn.
+Restart the daemon to get there; a drop ends the run without
+publishing it. The event trail shows the response twice only if the
+daemon stopped in the moment between the broker taking it and the
+worker recording that, and the restart came more than two minutes
+later. A drain stops runs at a step boundary, after that moment.
+
 A 429 also does three things fleet-wide, through the per-model provider
 throttle ([#278](https://github.com/bricef/factor-q/issues/278); design
 in
