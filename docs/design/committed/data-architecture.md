@@ -298,10 +298,12 @@ retry. `fq invocation drop` remains the alternative when progress should be
 abandoned. The contract — *that
 ambiguity is operator-visible across the cluster and not
 silently resolved* — is preserved by drop. Node-level
-recovery (`fq recover`) for stuck workers / control-plane is
-a follow-up; see the step-9 plan
-(`docs/plans/closed/2026-05-22-operator-cli.md`) for the
-scope decision.
+recovery, for a worker or a control plane that does not come
+back, has no verb and is not built: the step-9 plan
+(`docs/plans/closed/2026-05-22-operator-cli.md`) reserved a
+`recover` verb for it and did not build one (§9.4), and
+nothing consumes `worker.orphaned`
+([#475](https://github.com/bricef/factor-q/issues/475)).
 
 Until full step-resume lands, the sanctioned interim is
 **operator resume via interrupted-result injection**
@@ -1187,7 +1189,7 @@ consumers ignore unknown events. Same for `llm.dispatched`
 between `llm.request` and `llm.response`.
 
 After the envelope refactor (see
-`docs/plans/active/2026-05-15-event-envelope-refactor.md`),
+`docs/plans/closed/2026-05-15-event-envelope-refactor.md`),
 cost rides on the `llm.response` envelope rather than as a
 separate event; the canonical sequence shortens by one event
 per LLM turn.
