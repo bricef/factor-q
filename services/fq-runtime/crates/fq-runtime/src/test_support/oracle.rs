@@ -55,9 +55,11 @@ impl fmt::Display for TraceViolation {
 enum State {
     /// Nothing seen yet; only `triggered` is legal.
     Start,
-    /// A resumed run's first event: anything legal between actions, or
-    /// the `llm.failure` of the call the crashed incarnation failed on,
-    /// published again from its WAL row (issue 1108).
+    /// A resumed run's first event: anything legal between actions, or an
+    /// event published again from its WAL row: the `llm.failure` of the
+    /// call the crashed incarnation failed on (issue 1108), or the
+    /// `llm.response` of its last call, whose publish the stop may have
+    /// lost (issue 1168).
     ResumeStart,
     /// After that reproduced `llm.failure`: only the run's `failed`.
     ReproducedFailure,
@@ -96,12 +98,14 @@ pub fn check_invocation_trace_prefix(events: &[Event]) -> Result<(), Vec<TraceVi
 /// actions) and must still run to exactly one terminal followed by
 /// `invocation.archived`.
 ///
-/// One resume does not start between actions: the reproduction of a
+/// Two resumes do not start between actions. The reproduction of a
 /// failure whose ending was lost opens with the failed call's own
 /// `llm.failure`, republished from its WAL row with its original
 /// envelope, so its `parent_event_id` names the crashed incarnation's
 /// `llm.dispatched`, outside this trace; only the run's `failed` may
-/// follow it (issue 1108).
+/// follow it (issue 1108). A resume whose last call's `llm.response` may
+/// have been lost opens with that event, republished the same way, and
+/// the run goes on from between actions (issue 1168).
 pub fn check_resume_trace(events: &[Event]) -> Result<(), Vec<TraceViolation>> {
     check_with(events, State::ResumeStart, true)
 }
@@ -134,10 +138,13 @@ fn check_with(
     let mut state = start_state;
 
     for (i, event) in events.iter().enumerate() {
-        // A resume that does not open on a reproduced failure starts
+        // A resume that does not open on an event published again starts
         // between actions.
         let reproduced = matches!(state, State::ResumeStart)
-            && matches!(event.payload, EventPayload::LlmFailure(_));
+            && matches!(
+                event.payload,
+                EventPayload::LlmFailure(_) | EventPayload::LlmResponse(_)
+            );
         if matches!(state, State::ResumeStart) && !reproduced {
             state = State::Idle;
         }
@@ -151,7 +158,7 @@ fn check_with(
                 ),
             );
         }
-        // The reproduced failure keeps its original parent, in the
+        // The event published again keeps its original parent, in the
         // crashed incarnation's chain.
         if let Some(parent) = event.envelope.parent_event_id
             && !reproduced
@@ -191,8 +198,12 @@ fn check_with(
                     State::Idle
                 }
             },
-            // Only the reproduced `llm.failure` reaches here (see above).
-            State::ResumeStart => State::ReproducedFailure,
+            // Only an event published again reaches here (see above). After
+            // a lost `llm.response` the run goes on, between actions.
+            State::ResumeStart => match payload {
+                EventPayload::LlmResponse(_) => State::Idle,
+                _ => State::ReproducedFailure,
+            },
             State::ReproducedFailure => match payload {
                 EventPayload::Failed(_) => State::Terminal { archived: 0 },
                 other => {
@@ -1210,6 +1221,59 @@ mod tests {
 
         let mut fresh = Trace::new();
         fresh.push(llm_failure()).push(failed()).push(archived());
+        let violations = check_invocation_trace(&fresh.events).unwrap_err();
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.message.contains("must start with triggered")),
+            "{violations:?}"
+        );
+    }
+
+    /// A resume whose last call's `llm.response` may have been lost opens
+    /// on that event, republished with its original envelope: its parent is
+    /// the crashed incarnation's `llm.dispatched`, outside the resume's
+    /// trace, and the run goes on from between actions (issue 1168).
+    #[test]
+    fn a_resume_may_open_on_a_republished_llm_response() {
+        let mut t = resumed_after_a_crash(llm_response());
+        t.push(tool_call())
+            .push(tool_dispatched())
+            .push(tool_result(false))
+            .push(llm_request())
+            .push(llm_dispatched())
+            .push(llm_response())
+            .push(completed())
+            .push(archived());
+        check_resume_trace(&t.events).expect("a republished response, then the run goes on");
+        let mut crashed_again = resumed_after_a_crash(llm_response());
+        crashed_again.push(tool_call());
+        check_resume_trace_prefix(&crashed_again.events).expect("a prefix of one");
+    }
+
+    /// Only the opening may be a republished `llm.response`: one later,
+    /// between actions, is still a violation, and so is one opening a
+    /// fresh run.
+    #[test]
+    fn a_republished_llm_response_opens_a_resume_and_nothing_else() {
+        let mut late = Trace::new();
+        late.push(host_notice())
+            .push(llm_response())
+            .push(completed())
+            .push(archived());
+        let violations = check_resume_trace(&late.events).unwrap_err();
+        assert!(
+            violations.iter().any(|v| v
+                .message
+                .contains("unexpected llm_response between actions")),
+            "{violations:?}"
+        );
+
+        let mut fresh = Trace::new();
+        fresh
+            .push(llm_response())
+            .push(completed())
+            .push(archived());
         let violations = check_invocation_trace(&fresh.events).unwrap_err();
         assert!(
             violations

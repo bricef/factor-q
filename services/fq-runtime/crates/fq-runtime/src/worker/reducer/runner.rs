@@ -769,6 +769,12 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             ));
         }
         sort_into_replay_order(&mut completed);
+        // A resumed run's events start a fresh chain, linked to the crashed one by invocation_id
+        // only, unless a call's llm.response a stop may have lost goes out again here first, with
+        // its own parent, for them to chain on from (issue 1168; `runner/owed_response.rs`).
+        let mut cursor = self
+            .publish_owed(&agent_id, invocation_id, &llms, &tools)
+            .await?;
 
         // Regroup each model turn's tool results into the single
         // capability the live loop produced. A turn with >1 tool call is
@@ -896,14 +902,8 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             step_index += 1;
         }
 
-        // Continue the loop from the replayed point. Recovery
-        // re-emits start a fresh chain — parent_event_id resets to
-        // None for the first event the resumed runner emits. The
-        // projection links the pre-crash and post-resume chains by
-        // invocation_id only. A `recovered_from_event_id` envelope
-        // field could be added later if audit needs cross-incarnation
-        // stitching (see step 2 of the envelope-refactor plan).
-        // Reconstitute lifetime totals from the WAL so the budget
+        // Continue the loop from the replayed point, on the chain begun
+        // above. Reconstitute lifetime totals from the WAL so the budget
         // ceiling bounds the invocation's lifetime spend, not the
         // current attempt's. Successful agent turns count as LLM calls;
         // every completed agent turn counts as a Round, and every row
@@ -920,7 +920,6 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             .count()
             - resumed_partial_batch) as u32;
         let start = Instant::now();
-        let mut cursor: Option<Uuid> = None;
 
         // The post-call budget check that would have fired on the
         // original attempt fires here instead: a crash in the window
@@ -2398,6 +2397,7 @@ mod deferral;
 mod failure;
 mod llm;
 mod mcp;
+mod owed_response;
 mod own_row;
 mod publish_failure;
 mod replay;

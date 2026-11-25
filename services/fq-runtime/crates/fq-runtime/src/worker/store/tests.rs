@@ -490,7 +490,7 @@ async fn two_openers_of_a_fresh_worker_db_both_succeed() {
 
 /// The crash #970 predicted and nobody had reproduced: an upgrade that
 /// stops after some rungs have applied and before the version is
-/// written. Rung 13 fails part-way here, after rungs 2 to 12 have run;
+/// written. Rung 14 fails part-way here, after rungs 2 to 13 have run;
 /// without the transaction they stayed, the file still read v1, and
 /// every later open re-ran rung 2 and failed on `is_error`. With it,
 /// nothing stays and the next open upgrades cleanly.
@@ -505,7 +505,7 @@ async fn a_worker_upgrade_interrupted_after_a_rung_reopens_cleanly() {
 
     let mut interrupted = WorkerStore::MIGRATIONS.to_vec();
     let last = interrupted.last_mut().expect("the ladder has rungs");
-    last.1 = "ALTER TABLE llm_dispatch ADD COLUMN failure_event TEXT; \
+    last.1 = "ALTER TABLE llm_dispatch ADD COLUMN response_event TEXT; \
               SELECT no_such_column FROM invocation_state";
     let err = schema::bootstrap_versioned(&pool, SCHEMA_CLASS, WORKER_SCHEMA_VERSION, &interrupted)
         .await
@@ -530,7 +530,7 @@ async fn a_worker_upgrade_interrupted_after_a_rung_reopens_cleanly() {
         .expect("the next open after an interrupted upgrade must succeed");
     assert!(
         !left_behind.contains(&"is_error".to_string()),
-        "rung 2 must roll back with the failure of rung 13"
+        "rung 2 must roll back with the failure of rung 14"
     );
     assert_eq!(
         store.read_schema_version().await.unwrap(),
@@ -1426,6 +1426,155 @@ async fn v12_to_v13_migration_opens_and_a_failed_calls_row_keeps_its_llm_failure
             .await
             .is_err(),
         "a closed row is not written again"
+    );
+}
+
+/// v14 (issue 1168): a successful call's row keeps the `llm.response` it is
+/// published in, whole, written by the statement that closes the row, and
+/// lets it go once it is marked published. Rows closed before v14, and
+/// rows closed any other way, keep none.
+#[tokio::test]
+async fn v13_to_v14_migration_opens_and_a_successful_calls_row_keeps_its_llm_response() {
+    use crate::events::{
+        Event, EventPayload, LlmCallOrigin, LlmResponsePayload, StopReason, TokenUsage,
+    };
+
+    let db = populated_db_at(13).await;
+    let store = WorkerStore::open(&db.path).await.unwrap();
+    assert_eq!(
+        store.read_schema_version().await.unwrap(),
+        Some(WORKER_SCHEMA_VERSION)
+    );
+    assert!(
+        !store
+            .list_llm_dispatches_for_invocation(&db.fixture.completed)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        store
+            .unpublished_llm_responses(&db.fixture.completed)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a row closed before v14 keeps no llm.response"
+    );
+
+    let event = Event::new(
+        crate::agent::AgentId::new("agent-v14").unwrap(),
+        uuid::Uuid::now_v7(),
+        EventPayload::LlmResponse(LlmResponsePayload {
+            round: 1,
+            call_id: uuid::Uuid::now_v7(),
+            parts: crate::events::assistant_parts(Some("hello".to_string()), vec![]),
+            stop_reason: StopReason::EndTurn,
+            usage: TokenUsage {
+                input_tokens: 100,
+                output_tokens: 20,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                cache_write_5m_tokens: None,
+                cache_write_1h_tokens: None,
+                reasoning_tokens: None,
+            },
+            origin: LlmCallOrigin::AgentTurn,
+        }),
+    );
+    let inv = event.envelope.invocation_id.to_string();
+    let (req, response) = ("req-v14", r#"{"content":"hello"}"#);
+    store
+        .write_llm_intent(&inv, req, "haiku", "{}", &LlmCallOrigin::AgentTurn, 1)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .write_llm_responded(&inv, req, response, 0.002, 3, &event)
+            .await
+            .is_err(),
+        "an intent row is not one a response closes"
+    );
+    store.write_llm_dispatched(&inv, req, 2).await.unwrap();
+    store
+        .write_llm_responded(&inv, req, response, 0.002, 3, &event)
+        .await
+        .unwrap();
+    let row = store.get_llm_dispatch(&inv, req).await.unwrap().unwrap();
+    assert_eq!(
+        (
+            row.status,
+            row.is_error,
+            row.cost_usd,
+            row.response.as_deref()
+        ),
+        (
+            DispatchStatus::Completed,
+            Some(false),
+            Some(0.002),
+            Some(response)
+        ),
+        "the same write closes the row on its response, with its cost"
+    );
+    let owed = store.unpublished_llm_responses(&inv).await.unwrap();
+    let [(owed_req, stored)] = &owed[..] else {
+        panic!("one llm.response kept: {owed:?}");
+    };
+    assert_eq!(owed_req, req);
+    assert_eq!(
+        serde_json::to_value(Event::from_wire(stored.as_bytes()).unwrap()).unwrap(),
+        serde_json::to_value(&event).unwrap(),
+        "the stored event round-trips whole, envelope included"
+    );
+    assert!(
+        store
+            .write_llm_responded(&inv, req, response, 0.002, 4, &event)
+            .await
+            .is_err(),
+        "a closed row is not written again"
+    );
+
+    store.mark_llm_response_published(&inv, req).await.unwrap();
+    assert!(
+        store
+            .unpublished_llm_responses(&inv)
+            .await
+            .unwrap()
+            .is_empty(),
+        "once published, the row lets it go"
+    );
+    let row = store.get_llm_dispatch(&inv, req).await.unwrap().unwrap();
+    assert_eq!(
+        (row.status, row.response.as_deref(), row.cost_usd),
+        (DispatchStatus::Completed, Some(response), Some(0.002)),
+        "and keeps everything else"
+    );
+
+    store
+        .write_llm_intent(
+            &inv,
+            "req-plain",
+            "haiku",
+            "{}",
+            &LlmCallOrigin::AgentTurn,
+            5,
+        )
+        .await
+        .unwrap();
+    store
+        .write_llm_dispatched(&inv, "req-plain", 6)
+        .await
+        .unwrap();
+    store
+        .write_llm_completed(&inv, "req-plain", response, false, 0.001, 7)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .unpublished_llm_responses(&inv)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a row closed without an event keeps none"
     );
 }
 
