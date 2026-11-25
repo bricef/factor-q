@@ -8,13 +8,13 @@ factor-q is not a chatbot or an interactive coding assistant. It is a continuous
 
 - **Event-driven** — every agent interaction is an event on a NATS-based event bus, enabling auditing, replay, and debugging
 - **Model-agnostic** — each agent in a graph targets the model best suited to its task, mixing providers freely
-- **Headless-first** — runs as a persistent server; CLI, TUI, and other interfaces are clients of the runtime
+- **Headless-first** — runs as a persistent server (`fqd`); the `fq` CLI and the web dashboard are clients of the runtime
 - **Cost-aware** — budget limits and spending controls built in from the start
-- **Extensible** — custom tools via subprocess/MCP; agent definitions as Markdown files, graph definitions as YAML
+- **Extensible** — external tools over MCP; agent definitions as Markdown files (graph definitions as YAML are decided, not built)
 
 ## Documentation
 
-- [Status](STATUS.md) — one screen: what runs today, where we are, what's next
+- [Status](STATUS.md) — what runs today, where the project is, what comes next
 - [Milestones](MILESTONES.md) — the states the project is working towards, what each means, and how to tell it has been reached
 - [Security posture](SECURITY.md) — current security limitations and vulnerability reporting
 - [Quickstart](QUICKSTART.md) — clone to running agent in under ten minutes
@@ -35,7 +35,7 @@ factor-q is not a chatbot or an interactive coding assistant. It is a continuous
 - [Reference workloads](docs/design/committed/reference-workloads.md) — concrete agent workloads (Canopy, TradingAgents) we use as design touchstones
 - [ADRs](docs/adrs/) — architectural decision records ([accepted](docs/adrs/accepted/), [draft](docs/adrs/draft/))
 - [Phase 1 (closed)](docs/plans/closed/2026-04-02-phase-1-foundation.md) — what shipped in the walking skeleton
-- [Phase 2 (active)](docs/plans/active/2026-04-11-phase-2-mcp-and-memory.md) — MCP, memory, and skills
+- [Phase 2 product plan (parked)](docs/plans/active/2026-04-11-phase-2-mcp-and-memory.md) — MCP, memory, and skills; not the production-readiness Phase 2
 - [Issues](https://github.com/bricef/factor-q/issues) — deferred work and the dispatch queue
 
 ## Technology
@@ -44,7 +44,7 @@ factor-q is not a chatbot or an interactive coding assistant. It is a continuous
 - **Event bus:** NATS + JetStream
 - **Projections:** SQLite
 - **Agent definitions:** Markdown with YAML frontmatter
-- **Graph definitions:** YAML with JSON Schema
+- **Graph definitions:** YAML with JSON Schema (decided in ADR-0012, not built)
 
 ## Project structure
 
@@ -76,6 +76,9 @@ factor-q/
 │
 ├── agents/examples/           Sample agent definitions
 ├── tests/smoke/               End-to-end smoke tests against a real LLM
+├── ops/dogfood/               The dogfood deployment: compose stack, deploy,
+│                              backup and restore scripts, runbook
+├── tools/                     fq-lint (size ratchets), fq-metrics (attempt ledger)
 │
 ├── docs/
 │   ├── adrs/                  Architectural decision records
