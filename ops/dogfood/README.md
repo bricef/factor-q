@@ -512,7 +512,7 @@ the tunnel can reach the address at all.
 The same override is where a rehearsal keeps the adapters off (`profiles:
 ["cutover"]` on `github-watcher` and `fq-cron`) while the old host's pair
 is still live — the [migration
-plan](../../docs/plans/active/2026-09-05-dogfood-host-migration.md) has
+plan](../../docs/plans/closed/2026-09-05-dogfood-host-migration.md) has
 the details.
 
 ## Continuous delivery: `deploy --auto`
@@ -719,7 +719,7 @@ backup set, a bootstrap and a restore — the same three steps whether the
 destination is a bigger VM, another provider or an internal guest. Moving
 *off* the old launcher shape is history: it happened once, on 2026-09-12,
 and the worked example with the day's real timings is the
-[migration plan](../../docs/plans/active/2026-09-05-dogfood-host-migration.md)
+[migration plan](../../docs/plans/closed/2026-09-05-dogfood-host-migration.md)
 ([#587](https://github.com/bricef/factor-q/issues/587)); the ops repo's
 `migrate/take-set.sh` is what packaged a set out of a launcher host, if
 one ever needs packaging again.
@@ -811,5 +811,5 @@ one ever needs packaging again.
 
 The one move this has actually had — pre-flight, the rehearsal, the
 day's sequence, acceptance, rollback and retirement — is the
-[migration plan](../../docs/plans/active/2026-09-05-dogfood-host-migration.md),
+[migration plan](../../docs/plans/closed/2026-09-05-dogfood-host-migration.md),
 and it is the worked example to read beside these eight steps.

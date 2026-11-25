@@ -1,5 +1,12 @@
 # Dogfood host migration — execution plan
 
+**Status:** closed 2026-11-25. The move was made on 2026-09-12 (see
+[Outcome](#outcome)), and the chores it unblocked are done or dropped
+(see [Retirement](#retirement)). Two things this plan cannot record:
+whether the old host was retired as written, and the closing of
+[#587](https://github.com/bricef/factor-q/issues/587), which is still
+open on GitHub.
+
 > **Opened 2026-09-05.** Executes the move
 > [ADR-0035](../../adrs/accepted/0035-container-image-and-compose-supervision.md)
 > decided and [#587](https://github.com/bricef/factor-q/issues/587) built
@@ -344,15 +351,22 @@ the move; rotate them on their own schedule.
 
 Then the chores the move unblocks:
 
-- STATUS.md's dogfood paragraph (it says the instance has not moved).
-- The phase-0 plan's "The dogfood instance" bullet.
+- STATUS.md's dogfood paragraph (it said the instance had not moved).
+  (Done 2026-09-12 in `a86120b0`: the paragraph records the move onto
+  the stack and the dedicated internal host.)
+- The phase-0 plan's "The dogfood instance" bullet. (Dropped: a closed
+  plan is not updated afterwards, and STATUS.md records the move.)
 - ADR-0035's `Implementation:` line — the last "not built" is this move.
   (Done 2026-11-21, by removing the line: ADRs no longer carry one, and
   STATUS.md holds what they said.)
 - The ops README's "Migrating an instance onto the stack": after the
   move it is a runbook for the next host, not the launcher shape; fold
   this plan's set-packaging into it or point at `backup.sh`.
+  (Done 2026-09-12 in `ffe48624`: the section is now "Moving an instance
+  to another host", a backup, bootstrap and restore runbook for any
+  destination, which points at `backup` for packaging the set.)
 - Close #587. Move this plan to `closed/` with what actually happened.
+  (Moved 2026-11-25; #587 is still open.)
 
 ## Risks
 

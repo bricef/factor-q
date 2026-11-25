@@ -2,7 +2,14 @@
 
 ## Status
 
-Active — **paused** (noted 2026-07-20): M1a–M2 are landed and verified; M3 (extraction) is next, deprioritized behind the M0 loop-hardening track since ~2026-07-05. Implements the design in
+Active — **parked** (2026-11-25): M1a–M2 are landed and verified; M3
+(extraction) is the next step when the track resumes. It was
+deprioritized behind the M0 loop-hardening track from about 2026-07-05,
+and the
+[2026-09-03 production-readiness review](../../reviews/2026-09-03-production-readiness-review.md)
+then parked it until that review's Phase 2 was done. Phase 2 finished on
+2026-11-21; when this track resumes is the maintainer's call and is not
+scheduled. Implements the design in
 [ADR-0023](../../adrs/accepted/0023-storage-and-vector-foundation.md) +
 [ADR-0024](../../adrs/accepted/0024-separate-databases-storage-foundation.md).
 Design forks and implementation decisions are resolved.
@@ -34,7 +41,7 @@ grant events + the durable outbox, the rebuildable grant projection
 [access-control guide](../../guide/access-control.md), and the fault DST +
 soak. See the
 [closed implementation plan](../closed/2026-07-03-m2-access-control.md).
-Next: **M3** — Layer-2 extraction.
+Next, when the track resumes: **M3** — Layer-2 extraction.
 
 ## Goal
 

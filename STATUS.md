@@ -149,8 +149,8 @@ it is the licence to keep changing shape quickly.
   [ops/dogfood](ops/dogfood/README.md), and the move itself — pre-flight,
   the restore set, the day's sequence, acceptance, rollback and
   retirement — is recorded in the
-  [dogfood host migration plan](docs/plans/active/2026-09-05-dogfood-host-migration.md)
-  (opened 2026-09-05).
+  [dogfood host migration plan](docs/plans/closed/2026-09-05-dogfood-host-migration.md)
+  (closed 2026-11-25).
 
 ## Where we are
 
@@ -164,7 +164,7 @@ what each milestone means and how to tell it is reached.
   closed on 2026-09-10: Phase 0's exit criteria were verified on the
   dogfood host on 2026-09-04, Phase 1 was code complete on 2026-09-06,
   and its follow-ups merged by 2026-09-09. The
-  [dogfood host migration](docs/plans/active/2026-09-05-dogfood-host-migration.md)
+  [dogfood host migration](docs/plans/closed/2026-09-05-dogfood-host-migration.md)
   carried both to the live instance on 2026-09-12.
 - **Phase 2, "the record is trustworthy", is done.** Its last issue
   closed on 2026-11-21, and all 46 issues in its

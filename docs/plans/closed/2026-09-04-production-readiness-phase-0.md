@@ -7,7 +7,7 @@ reached code-complete on `main` on 2026-09-06 and its follow-ups landed
 by 2026-09-09 — see [Outcome](#outcome) below. What this plan did not do
 is put Phase 1 on the live instance: that is the move onto the compose
 stack, tracked by the
-[dogfood host migration plan](../active/2026-09-05-dogfood-host-migration.md)
+[dogfood host migration plan](2026-09-05-dogfood-host-migration.md)
 (#587). Phase 2 (the record is trustworthy) is next, by hand, one PR at a
 time, per the review. Originally: active (2026-09-04). Tracking issue:
 [#554](https://github.com/bricef/factor-q/issues/554).
