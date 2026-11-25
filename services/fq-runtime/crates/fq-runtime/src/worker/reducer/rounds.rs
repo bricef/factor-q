@@ -91,7 +91,7 @@ impl RoundLedger {
 /// What a run's model-call rows in the WAL add up to: its totals, with
 /// the agent-call count and the total and server-origin cost buckets, and
 /// the Rounds its agent turns consumed. A resume seeds its totals from
-/// this, and the archive sweeper's held ending reports it.
+/// this, and [`totals_of_wal_rows`] adds the run's tool calls to it.
 ///
 /// The counters have different filters on purpose. `calls`
 /// feeds `total_llm_calls`, which counts turns that produced an
@@ -137,6 +137,26 @@ pub(crate) fn totals_of_llm_rows(
         ..InvocationTotals::default()
     };
     (totals, rounds)
+}
+
+/// A run's totals as all its rows in the WAL record them: its model calls
+/// by [`totals_of_llm_rows`], and the tool calls that completed. A tool row
+/// still `intent` or `dispatched` has no outcome, and is not a call made.
+/// The duration stays zero: it belongs to one attempt, and no row records
+/// it. The `failed` a resume reproduces for a lost failure carries these,
+/// and so does the archive sweeper's held ending.
+pub(crate) fn totals_of_wal_rows(
+    llms: &[crate::worker::store::LlmDispatchRow],
+    tools: &[crate::worker::store::ToolDispatchRow],
+) -> InvocationTotals {
+    use crate::worker::store::DispatchStatus;
+    let (mut totals, _rounds) = totals_of_llm_rows(llms);
+    let completed_tools = tools
+        .iter()
+        .filter(|row| row.status == DispatchStatus::Completed)
+        .count();
+    totals.total_tool_calls = u32::try_from(completed_tools).unwrap_or(u32::MAX);
+    totals
 }
 
 #[cfg(test)]
