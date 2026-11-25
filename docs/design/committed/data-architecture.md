@@ -251,6 +251,22 @@ same event: the stream's `Nats-Msg-Id` dedup drops the second
 inside its 120 s window, and the projection's upsert on
 `event_id` keeps one row past it, so the cost is counted once.
 
+A call that succeeds is closed `completed` with its response and
+cost, and only then is its `llm.response` published, the only
+event that carries a successful call's usage and cost. The
+statement that closes the row keeps that event too, envelope and
+`event_id` included (`llm_dispatch.response_event`, worker schema
+v14, [#1168](https://github.com/bricef/factor-q/issues/1168)), and
+the row lets it go once the publish returns. A run waits for each
+publish before it does anything else, so only its last call can
+still keep one: its drive ended at that publish, on a bus error or
+a stop, or just after it. The resume publishes the kept event
+before the run goes on, and the run's next events chain on from
+it; a copy that had already reached the stream is the same event,
+counted once as above. A drain or a halt stops a run at a step
+boundary, after the row let its copy go, so a resume after one
+publishes nothing again.
+
 ### 4.3 Reducer state
 
 Between any two `step` calls, the reducer's state blob is
@@ -901,7 +917,7 @@ factor-q runtime starting
   control-plane db: /home/op/.cache/factor-q/control-plane.db
   projection db:    /home/op/.cache/factor-q/projection.db
   control plane:    v1
-  worker schema:    v13
+  worker schema:    v14
   worker:           01997c4e-9b1a-7c33-8f0d-2a5b6c7d8e9f (host: prod-1)
   in-flight:        3 (1 safe-resume, 1 safe-replay, 1 ambiguous)
   pricing entries:  62 (cache: /home/op/.cache/factor-q/pricing.json)
