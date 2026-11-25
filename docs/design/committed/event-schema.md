@@ -877,7 +877,7 @@ Published by the daemon's summary consumer (#216) — never by an agent — unde
 ```json
 {
   "runtime_id": "01997c4e-9b1a-7c33-8f0d-2a5b6c7d8e9f",
-  "version": "0.1.0",
+  "version": "0.0.1",
   "nats_url": "nats://localhost:4222",
   "agents_loaded": 3,
   "pricing_entries": 12,
