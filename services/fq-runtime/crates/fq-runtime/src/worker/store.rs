@@ -43,6 +43,7 @@ use sqlx::{Pool, Row, Sqlite};
 use crate::db::schema::{self, Migration, SchemaError};
 
 mod durable_starts;
+mod llm_failure;
 mod llm_origin;
 mod state_update;
 pub(crate) mod terminal_outcome;
@@ -878,41 +879,6 @@ impl WorkerStore {
             Some(r) => Ok(Some(row_to_llm_dispatch(r)?)),
             None => Ok(None),
         }
-    }
-
-    /// Stamp the errored row a deferral was decided on (#278). Only a
-    /// `completed` row closed `is_error` qualifies — the 429 the retry
-    /// layer gave up on is recorded there before the deferral is
-    /// decided — so a stamp that finds no such row is a WAL transition
-    /// error, not a silent no-op.
-    pub async fn mark_llm_deferred(
-        &self,
-        invocation_id: &str,
-        request_id: &str,
-        deferred_at: i64,
-    ) -> Result<(), WorkerStoreError> {
-        let res = sqlx::query(
-            r#"
-            UPDATE llm_dispatch
-            SET deferred_at = ?
-            WHERE invocation_id = ? AND request_id = ? AND status = ? AND is_error = 1
-            "#,
-        )
-        .bind(deferred_at)
-        .bind(invocation_id)
-        .bind(request_id)
-        .bind(DispatchStatus::Completed.as_str())
-        .execute(&self.pool)
-        .await?;
-        if res.rows_affected() == 0 {
-            return Err(WorkerStoreError::WalTransitionFailed {
-                entity: "llm_dispatch",
-                invocation_id: invocation_id.to_string(),
-                call_id: request_id.to_string(),
-                reason: "no completed error row to mark deferred".to_string(),
-            });
-        }
-        Ok(())
     }
 
     pub async fn find_ambiguous_llm_dispatches(
