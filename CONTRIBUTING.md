@@ -72,7 +72,7 @@ factor-q/
 
 ## Running tests
 
-factor-q has four test tiers, each with different prerequisites
+factor-q has three test tiers, each with different prerequisites
 and coverage:
 
 ### Tier 1: Unit tests
@@ -154,8 +154,8 @@ just smoke                                     # end-to-end (needs a provider ke
 ```
 
 Or `just ci` for the full local gate in one shot — `lint-docs`,
-`check-links`, `quality`, `audit`, the four Rust suites, and `go-ci`,
-timed per phase and fail-fast. It covers everything CI runs bar two
+`check-links`, `quality`, `audit`, the four Rust suites, `go-ci` and
+`ops-ci` (the ops scripts' tests), timed per phase and fail-fast. It covers everything CI runs bar two
 carve-outs it names: `smoke` (paid) and the container images
 (`docker-build` needs release binaries for a target and a docker
 daemon; after changing the Dockerfile, build them and run
@@ -172,14 +172,21 @@ daemon; after changing the Dockerfile, build them and run
   you want to iterate on one:
 
   ```sh
-  just quality          # all of the below, fail-fast, timed
-  just lint-sources     # the include! ban (see AGENTS.md)
-  just test-fq-lint     # unit tests for the linter itself
-  just lint-sizes       # file, function + allow-census ratchets
-  just lint-fmt         # cargo fmt --check, workspace-wide
-  just lint-clippy      # clippy per crate, with each crate's features
-  just lint-creep       # functions approaching the 250-line cap (advisory)
-  just lint-coupling    # module fan-in/fan-out and cycles (advisory)
+  just quality                # all of the below, fail-fast, timed
+  just check-pins             # hand-copied tool and broker versions match their pins
+  just check-assets           # vendored dashboard assets match their checksums
+  just check-schema-versions  # the watcher reads every event schema version
+  just lint-sources           # the include! ban (see AGENTS.md)
+  just test-fq-lint           # unit tests for the linter itself
+  just test-fq-metrics        # the metrics extractor's fixture tests
+  just test-metrics-log       # the measurement log's tests
+  just test-audit-main-issue  # the scheduled-audit issue script's tests
+  just lint-sizes             # file, function + allow-census ratchets
+  just lint-fmt               # cargo fmt --check, workspace-wide
+  just lint-clippy            # clippy per crate, with each crate's features
+  just lint-creep             # functions approaching the 250-line cap (advisory)
+  just lint-coupling          # module fan-in/fan-out and cycles (advisory)
+  just lint-pub-surface       # pub items with one internal consumer (advisory)
   ```
 
   Listed in the order `quality` runs them.
