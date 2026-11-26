@@ -41,7 +41,7 @@ it is the maintainer's call and is not decided.
 | Milestone | State | Comes after |
 |---|---|---|
 | [Production readiness, Phase 2](#production-readiness-phase-2-the-record-is-trustworthy) | Finished 2026-11-21 | Phases 0 and 1 (done) |
-| [v0.0.1](#v001-first-tagged-release) | Next: its two blockers are being fixed | Phase 2 and the review of open bugs (both done) |
+| [v0.0.1](#v001-first-tagged-release) | Reached 2026-11-26 | Phase 2 and the review of open bugs (both done) |
 | [Production readiness, Phase 3](#production-readiness-phase-3-bounded-growth-and-operable-state) | Not started, not scheduled | Not decided |
 | [M1 Net zero](#m1-net-zero-loop-instrumentation-and-reliability) | In progress | M0 (met 2026-07-20) |
 | [Storage M3–M5](#storage-m3m5-extraction-embedding-service-wiring) | Parked | Not decided |
@@ -110,9 +110,9 @@ release is the maintainer's call.
 
 [GitHub milestone](https://github.com/bricef/factor-q/milestone/11)
 
-**Purpose.** The first release cut from a tag. Until now the only
-published artefacts are the rolling `main-latest` builds, and the release
-workflow has never run.
+**Purpose.** The first release cut from a tag. Before it, the only
+published artefacts were the rolling `main-latest` builds, and the release
+workflow had never run.
 
 **Where it comes from.** The maintainer's stated next steps after Phase 2,
 recorded on 2026-11-12. Two steps, in order: review every open bug for
@@ -121,26 +121,26 @@ whether it still describes the code after Phase 2, then mint the tag.
 **Reached when** `v0.0.1` exists as a tagged release built by
 `release.yml`.
 
-**State.** The first step is done. On 2026-11-25, 76 open issues were
+**State.** Reached on 2026-11-26: [`v0.0.1`](https://github.com/bricef/factor-q/releases/tag/v0.0.1) was tagged at `bba392cd`, built by
+`release.yml` on its first run for three platforms, installed with
+`install.sh` on a fresh container that never had the source, where the
+smoke suite passed, and published.
+
+Both steps were done in order. On 2026-11-25, 76 open issues were
 re-checked against `main` and 4 were closed; the result is a comment on
-[#977](https://github.com/bricef/factor-q/issues/977). The same day the
-maintainer chose two bugs that block the release, and both are being
-fixed:
+[#977](https://github.com/bricef/factor-q/issues/977). The maintainer then
+chose the bugs that blocked the release, all fixed before the tag:
+[#1108](https://github.com/bricef/factor-q/issues/1108) and
+[#1168](https://github.com/bricef/factor-q/issues/1168) (a model call's
+cost lost from the event stream when its event's publish was lost), and
+[#1040](https://github.com/bricef/factor-q/issues/1040) (an MCP resource
+read during setup with no timeout).
 
-- [#1108](https://github.com/bricef/factor-q/issues/1108): when a billed
-  model call fails and the publish of its failure event is lost, the
-  call's cost never reaches the event stream.
-- [#1040](https://github.com/bricef/factor-q/issues/1040): an MCP
-  resource read during an invocation's setup has no timeout, so a server
-  that never answers holds the run and its worker permit for as long as
-  the daemon lives. Reporting a setup that is held too long, whatever the
-  cause, is [#1159](https://github.com/bricef/factor-q/issues/1159), and
-  does not block the release.
-
-**Open question.** The review's Phase 4 ends by cutting `v0.1.0`. Whether
-`v0.0.1` comes before that or replaces it, and which Phase 4 items it
-needs first, is not decided; it is recorded on
-[#978](https://github.com/bricef/factor-q/issues/978).
+**Decided on 2026-11-25** ([#978](https://github.com/bricef/factor-q/issues/978)):
+`v0.0.1` is the first run of the release machinery and promises nothing
+beyond pre-alpha; the review's Phase 4 still ends by cutting `v0.1.0`. The
+one Phase 4 item `v0.0.1` waited for was a release build from the tested
+lockfile (`--locked`). Everything else in Phase 4 waits for `v0.1.0`.
 
 ### Production readiness, Phase 3: bounded growth and operable state
 
@@ -333,7 +333,8 @@ A milestone is opened when the work is next, not before.
   Phase 5 is thirty days on that release with no intervention caused by a
   runtime defect. Both are defined in the
   [review](docs/reviews/2026-09-03-production-readiness-review.md). How
-  Phase 4 relates to `v0.0.1` is the open question recorded above.
+  Phase 4 relates to `v0.0.1` was decided on 2026-11-25: `v0.0.1` is the
+  first run of the release machinery, and Phase 4 still ends with `v0.1.0`.
 - **The graph executor.** The
   [two-node vertical](docs/plans/active/2026-07-07-graph-executor-two-node-vertical.md)
   is the first multi-agent work

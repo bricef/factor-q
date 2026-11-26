@@ -139,5 +139,5 @@ execution, until stronger credential, network, and process isolation ships.
 
 ## Reporting a Vulnerability
 
-Whilst this project is pre-alpha (no release has been tagged yet), please
+Whilst this project is pre-alpha, please
 raise security issues as normal GitHub issues.
