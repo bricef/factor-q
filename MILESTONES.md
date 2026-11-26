@@ -41,7 +41,7 @@ it is the maintainer's call and is not decided.
 | Milestone | State | Comes after |
 |---|---|---|
 | [Production readiness, Phase 2](#production-readiness-phase-2-the-record-is-trustworthy) | Finished 2026-11-21 | Phases 0 and 1 (done) |
-| [v0.0.1](#v001-first-tagged-release) | Next: its two blockers are being fixed | Phase 2 and the review of open bugs (both done) |
+| [v0.0.1](#v001-first-tagged-release) | Next: its two blockers are fixed, the tag is not cut | Phase 2 and the review of open bugs (both done) |
 | [Production readiness, Phase 3](#production-readiness-phase-3-bounded-growth-and-operable-state) | Not started, not scheduled | Not decided |
 | [M1 Net zero](#m1-net-zero-loop-instrumentation-and-reliability) | In progress | M0 (met 2026-07-20) |
 | [Storage M3–M5](#storage-m3m5-extraction-embedding-service-wiring) | Parked | Not decided |
@@ -124,18 +124,23 @@ whether it still describes the code after Phase 2, then mint the tag.
 **State.** The first step is done. On 2026-11-25, 76 open issues were
 re-checked against `main` and 4 were closed; the result is a comment on
 [#977](https://github.com/bricef/factor-q/issues/977). The same day the
-maintainer chose two bugs that block the release, and both are being
-fixed:
+maintainer chose two bugs that block the release, and both were fixed on
+`main` the same day; both issues are closed. What remains is the tag
+itself.
 
 - [#1108](https://github.com/bricef/factor-q/issues/1108): when a billed
-  model call fails and the publish of its failure event is lost, the
-  call's cost never reaches the event stream.
+  model call failed and the publish of its failure event was lost, the
+  call's cost never reached the event stream. The runner now keeps the
+  `llm.failure` on the call's WAL row, and a resume republishes that
+  event — the same event — before the run's `failed`.
 - [#1040](https://github.com/bricef/factor-q/issues/1040): an MCP
-  resource read during an invocation's setup has no timeout, so a server
-  that never answers holds the run and its worker permit for as long as
-  the daemon lives. Reporting a setup that is held too long, whatever the
-  cause, is [#1159](https://github.com/bricef/factor-q/issues/1159), and
-  does not block the release.
+  resource read during an invocation's setup had no timeout, so a server
+  that never answered held the run and its worker permit for as long as
+  the daemon lived. Each read of a pinned resource is now bounded by
+  `[mcp] resource_read_timeout_secs` (default 30, per pin). Reporting a
+  setup that is held too long, whatever the cause, is
+  [#1159](https://github.com/bricef/factor-q/issues/1159), and does not
+  block the release.
 
 **Open question.** The review's Phase 4 ends by cutting `v0.1.0`. Whether
 `v0.0.1` comes before that or replaces it, and which Phase 4 items it

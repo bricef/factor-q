@@ -1,9 +1,10 @@
 # Status
 
 What runs today, where the project is, and what comes next. Updated at
-milestone boundaries — **last: 2026-11-25** (production-readiness Phase 2
-finished on 2026-11-21, and the review of open issues that follows it
-chose the two bugs that block the first tagged release; before that,
+milestone boundaries — **last: 2026-11-26** (the two bugs that block the
+first tagged release were both fixed on `main` on 2026-11-25;
+production-readiness Phase 2 finished on 2026-11-21, and the review of
+open issues that follows it chose those two bugs; before that,
 2026-09-12, the dogfood instance moved onto the compose stack;
 2026-09-10, the production-readiness Phase 0 plan closed with Phases 0
 and 1 on `main`; 2026-08-26, ADR-0006 + ADR-0031: the edge migration gate
@@ -182,16 +183,24 @@ what each milestone means and how to tell it is reached.
   ([#978](https://github.com/bricef/factor-q/issues/978)). No release has
   been cut yet: the only published builds are the rolling `main-latest`
   ones. On 2026-11-25 the maintainer decided that two bugs block the
-  release. Both are being fixed, and neither is fixed yet:
+  release. Both were fixed on `main` on 2026-11-25, and both issues are
+  closed; the tag itself is still to be cut:
   - [#1108](https://github.com/bricef/factor-q/issues/1108): when a
-    billed model call fails and the publish of its failure event is lost,
-    a resume publishes the run's `failed` with zero totals and never the
-    call's `llm.failure`, so the spend reaches neither the event stream
-    nor the cost views.
+    billed model call failed and the publish of its failure event was
+    lost, a resume published the run's `failed` with zero totals and
+    never the call's `llm.failure`, so the spend reached neither the
+    event stream nor the cost views. The runner now keeps the
+    `llm.failure` on the call's WAL row before it closes the row, and a
+    resume publishes that very event — same `event_id` — before the
+    run's `failed`, whose totals are rebuilt from the run's WAL rows.
   - [#1040](https://github.com/bricef/factor-q/issues/1040): an MCP
-    `resources/read` during an invocation's setup has no timeout, so a
-    server that accepts the request and never answers holds the run, and
-    its worker permit, for as long as the daemon lives. Reporting a setup
+    `resources/read` during an invocation's setup had no timeout, so a
+    server that accepted the request and never answered held the run,
+    and its worker permit, for as long as the daemon lived. Each read of
+    a pinned resource is now bounded by `[mcp] resource_read_timeout_secs`
+    (default 30, applied per pin); a read that runs out leaves the pin
+    out of the context with a warning and the run goes on — see the
+    [MCP guide](docs/guide/mcp.md). Reporting a setup
     that is held that long, whatever the cause, is
     [#1159](https://github.com/bricef/factor-q/issues/1159), and does not
     block the release.
@@ -635,9 +644,11 @@ lands late cannot delete a claim a copy has taken again since
 seconds are what lets every release the store answers, landed or
 refused, be logged as what it was. A setup that hangs before its first
 WAL write is therefore kept alive, and nothing reports it. An MCP
-resource read in setup that never answers is one such hang, and it has
-no timeout ([#1040](https://github.com/bricef/factor-q/issues/1040),
-being fixed); reporting any setup held that long is
+resource read in setup that never answers used to be one such hang; each
+read of a pinned resource is now bounded by `[mcp]
+resource_read_timeout_secs` (default 30, per pin), so that route is
+closed ([#1040](https://github.com/bricef/factor-q/issues/1040), fixed
+on 2026-11-25); reporting any setup held that long is
 [#1159](https://github.com/bricef/factor-q/issues/1159).
 
 A copy that meets a claim the daemon holds itself is settled by what is
