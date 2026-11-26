@@ -94,7 +94,20 @@ factor-q/
 
 ## Install
 
-Until the first release, build factor-q from source, as in the [Quickstart](QUICKSTART.md):
+Pre-built binaries for Linux (x86_64 and aarch64) and Apple Silicon macOS are on the
+[releases page](https://github.com/bricef/factor-q/releases); the first is
+[`v0.0.1`](https://github.com/bricef/factor-q/releases/tag/v0.0.1). The installer picks the bundle for your platform,
+verifies its checksum, and installs `fq`, `fqd` and `fq-cas` into `~/.local/bin`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/bricef/factor-q/main/install.sh | sh
+```
+
+The binaries need a NATS server with JetStream, and `fq init` writes a project with a
+`docker-compose.yml` that runs one locally. factor-q is pre-alpha: see
+[STATUS.md](STATUS.md#maturity-pre-alpha) before depending on it.
+
+To build from source instead, as in the [Quickstart](QUICKSTART.md):
 
 ```sh
 git clone https://github.com/bricef/factor-q.git
@@ -122,8 +135,6 @@ just fq events tail                     # watch events
 Every `fq` verb answers over the daemon's authenticated edge, so the daemon
 has to be up and this client has to be paired with it before any of them
 work.
-
-Pre-built binary installs via `install.sh` will be available after the first release.
 
 ## Getting started
 

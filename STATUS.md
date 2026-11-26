@@ -1,9 +1,10 @@
 # Status
 
 What runs today, where the project is, and what comes next. Updated at
-milestone boundaries — **last: 2026-11-25** (production-readiness Phase 2
-finished on 2026-11-21, and the review of open issues that follows it
-chose the two bugs that block the first tagged release; before that,
+milestone boundaries — **last: 2026-11-26** (the first tagged release,
+`v0.0.1`, was published; before that, 2026-11-25, production-readiness
+Phase 2 had finished on 2026-11-21 and the review of open issues that
+follows it chose the bugs that blocked the release;
 2026-09-12, the dogfood instance moved onto the compose stack;
 2026-09-10, the production-readiness Phase 0 plan closed with Phases 0
 and 1 on `main`; 2026-08-26, ADR-0006 + ADR-0031: the edge migration gate
@@ -13,9 +14,10 @@ If this contradicts `git log`, trust the log and fix this file.
 
 ## Maturity: pre-alpha
 
-**There are no external users, no published release, and no compatibility
-promise of any kind.** Everything below is built on that assumption, and
-so is every review of it.
+**There are no external users and no compatibility promise of any kind.**
+One release has been published, [`v0.0.1`](https://github.com/bricef/factor-q/releases/tag/v0.0.1) (2026-11-26), and it
+promises no more than this section does. Everything below is built on that
+assumption, and so is every review of it.
 
 Concretely, and deliberately:
 
@@ -126,8 +128,8 @@ it is the licence to keep changing shape quickly.
 - **Infra** — NATS via `infrastructure/docker-compose.yml`, bound to localhost
   with the public static development token `fq-dev-token`. Do not expose its
   port, and replace the token for any non-local deployment. Build from source
-  (`just up`, see [Quickstart](QUICKSTART.md)); `install.sh` awaits the
-  first release. Deployed artifacts follow
+  (`just up`, see [Quickstart](QUICKSTART.md)), or install the latest tagged
+  release with `install.sh` ([`v0.0.1`](https://github.com/bricef/factor-q/releases/tag/v0.0.1) is the first). Deployed artifacts follow
   [ADR-0035](docs/adrs/accepted/0035-container-image-and-compose-supervision.md)
   (accepted 2026-09-04): every merge to `main` publishes one container
   image per binary to `ghcr.io/bricef`, tagged with the commit its binary
@@ -178,23 +180,30 @@ what each milestone means and how to tell it is reached.
   2026-11-12. Four were closed, two as fixed and two as duplicates, and
   five were rewritten because the problem had changed shape. The result
   is a comment on [#977](https://github.com/bricef/factor-q/issues/977).
-- **Next is the first tagged release, `v0.0.1`**
-  ([#978](https://github.com/bricef/factor-q/issues/978)). No release has
-  been cut yet: the only published builds are the rolling `main-latest`
-  ones. On 2026-11-25 the maintainer decided that two bugs block the
-  release. Both are being fixed, and neither is fixed yet:
-  - [#1108](https://github.com/bricef/factor-q/issues/1108): when a
-    billed model call fails and the publish of its failure event is lost,
-    a resume publishes the run's `failed` with zero totals and never the
-    call's `llm.failure`, so the spend reaches neither the event stream
-    nor the cost views.
+- **The first tagged release, `v0.0.1`, was published on 2026-11-26**
+  ([#978](https://github.com/bricef/factor-q/issues/978),
+  [release](https://github.com/bricef/factor-q/releases/tag/v0.0.1)). It is the first run of the release machinery and
+  promises nothing beyond pre-alpha; `v0.1.0` stays the review's Phase 4
+  release. Three bugs blocked it, all fixed before the tag:
+  - [#1108](https://github.com/bricef/factor-q/issues/1108): a billed
+    model call that failed, and whose failure event's publish was lost,
+    lost its cost from the event stream. Its row now keeps the event, and a
+    resume publishes it again.
+  - [#1168](https://github.com/bricef/factor-q/issues/1168): the same
+    loss for a call that succeeded, when its `llm.response` publish was
+    lost.
   - [#1040](https://github.com/bricef/factor-q/issues/1040): an MCP
-    `resources/read` during an invocation's setup has no timeout, so a
-    server that accepts the request and never answers holds the run, and
-    its worker permit, for as long as the daemon lives. Reporting a setup
-    that is held that long, whatever the cause, is
-    [#1159](https://github.com/bricef/factor-q/issues/1159), and does not
-    block the release.
+    resource read during an invocation's setup had no timeout; it is now
+    bounded by `[mcp] resource_read_timeout_secs`. Reporting a setup that
+    is held too long, whatever the cause, is
+    [#1159](https://github.com/bricef/factor-q/issues/1159).
+  The one Phase 4 item it waited for is in: the release build uses
+  `--locked`, so the shipped binaries are built from the lockfile CI
+  tested. Before it was published, `install.sh` installed it on a fresh
+  container that never had the source, and the smoke suite passed
+  against the installed binaries. Its release notes list the known gaps,
+  the first of them that edge tokens never expire
+  ([#404](https://github.com/bricef/factor-q/issues/404)).
 - **What comes after the release is not decided.** A
   [Phase 3 milestone](https://github.com/bricef/factor-q/milestone/10)
   exists, with some issues placed in it, but the maintainer has said he
